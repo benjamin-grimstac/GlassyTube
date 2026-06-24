@@ -2,9 +2,9 @@ name: Android CI
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "master" ]
+    branches: [ "main" ]
 
 jobs:
   build:
@@ -23,10 +23,12 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
     - name: Build with Gradle
-      run: ./gradlew build
+      run: ./gradlew :app:assembleDebug :Glassy-Remote:assembleDebug
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: built-apk
-        path: app/build/outputs/apk/**/*.apk
+        name: debug-apks
+        path: |
+          app/build/outputs/apk/debug/*.apk
+          Glassy-Remote/build/outputs/apk/debug/*.apk
