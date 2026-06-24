@@ -7,7 +7,7 @@ Last updated: 2026-06-24
 This is an extended Google Glass Explorer Edition / XE24 build of GlassyTube, based on CatotheCat11/GlassTube. The public product name is now `GlassyTube`; Android package names, Java class names, and `/glasstube/*` remote endpoints intentionally remain compatible with the original GlassTube namespace.
 
 - App package: `com.catothecat.glasstube`
-- Remote package: `com.glass.remoteagent`
+- Glassy-Remote package: `com.glass.remoteagent`
 - Glass IP during testing: `<glass-ip>`
 - Remote port: `8765`
 - Remote token during testing: `<pairing-token>`
@@ -18,10 +18,10 @@ The target device is Android 4.4.4 / XE24, rooted, with ADB working.
 
 - `MainActivity` owns Glass card navigation for Search, Queue, Recent, Favorites, Send to Glass, playlist/channel/search result cards, and direct YouTube URL handling.
 - `VideoActivity` owns playback through ExoPlayer and NewPipeExtractor stream resolution.
-- `GlassTubeCommandReceiver` receives commands from the remote agent and routes app commands to GlassyTube.
+- `GlassTubeCommandReceiver` receives commands from Glassy-Remote and routes app commands to GlassyTube.
 - `GlassTubeStatusProvider` exposes current app/player state to the remote.
 - `GlassTubeServer` is the older in-app server path.
-- `remoteagent` owns the main PWA remote on port `8765`.
+- `Glassy-Remote` owns the main PWA remote on port `8765`.
 - `VideoStore` persists queue, history, favorites, active state, and playback status.
 
 ## Important Device Behavior
@@ -37,24 +37,24 @@ The target device is Android 4.4.4 / XE24, rooted, with ADB working.
 
 Build results:
 
-- `:app:assembleDebug`, `:remoteagent:assembleDebug`, `:app:lintDebug`, and `:remoteagent:lintDebug` pass with `abortOnError=true`.
-- `:app:assembleRelease` and `:remoteagent:assembleRelease` pass.
+- `:app:assembleDebug`, `:Glassy-Remote:assembleDebug`, `:app:lintDebug`, and `:Glassy-Remote:lintDebug` pass with `abortOnError=true`.
+- `:app:assembleRelease` and `:Glassy-Remote:assembleRelease` pass.
 - Remaining lint output is warning-only and mostly old-target/dependency/version-catalog/upstream unused resource noise. There are no current lint errors.
 
 Security/release cleanup:
 
 - App backup is disabled and backup/data-extraction XML denies backup/transfer.
 - Remote backup is disabled and has deny-all backup/data-extraction XML.
-- The old Glass development permission was removed from GlassyTube and GlassyTube Remote.
+- The old Glass development permission was removed from GlassyTube and Glassy-Remote.
 - Remote state-changing endpoints require the pairing token; unauthenticated `/glasstube/control` returned HTTP `401` in the latest device test.
 - Source/doc scan outside build output found no live Glass IP, pairing token, or local Windows user path.
 
 Latest device verification:
 
 - Installed current debug APKs to device `015DA6FC13015016`.
-- GlassyTube Remote started on port `8765`; `/status` reported GlassyTube installed and inactive before wake/open.
+- Glassy-Remote started on port `8765`; `/status` reported GlassyTube installed and inactive before wake/open.
 - `find a video` is registered as the only GlassyTube OK Glass voice-trigger activity from this project.
-- GlassyTube Remote has no OK Glass voice trigger.
+- Glassy-Remote has no OK Glass voice trigger.
 - Remote opened livestream `https://www.youtube.com/watch?v=vOTiJkg1voo`.
 - Remote `pause`, `play`, `seek_to:10000`, and `exit` all returned success.
 - Logs showed HLS master manifest selection and AAC-LC audio override for bone-conduction-friendly playback.
@@ -130,7 +130,7 @@ Remote navigation issue fixed:
 Diagnostics:
 
 - GlassTube now writes a rolling diagnostic log to app-private storage.
-- The remote agent exposes that log through `/logs` and `/glasstube/logs`.
+- Glassy-Remote exposes that log through `/logs` and `/glasstube/logs`.
 - The log includes MainActivity launch/intent events, remote commands, voice results/timeouts, search/playlist/channel failures, stream selection, HLS selection, playback errors, and audio-track selection.
 - The app also attempts to write `/sdcard/GlassTube/glasstube.log`, but on some Glass builds external storage writes can fail. Treat the provider-backed remote `/logs` endpoint as the reliable path.
 

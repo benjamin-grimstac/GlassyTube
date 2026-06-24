@@ -16,7 +16,7 @@ Base project:
 Additional work in GlassyTube:
 
 - Google Glass Explorer Edition / XE24 testing
-- GlassyTube Remote on port `8765`
+- Glassy-Remote on port `8765`
 - Phone/PWA link sending and queueing
 - Remote media, timeline, volume, keyboard, and navigation controls
 - History, favorites, and queue
@@ -47,7 +47,7 @@ Additional work in GlassyTube:
 ## Modules
 
 - `app` - main GlassyTube app for Glass UI, search, playback, history, favorites, and queue.
-- `remoteagent` - GlassyTube Remote web server and control bridge.
+- `Glassy-Remote` - Glassy-Remote web server and control bridge.
 
 ## Build
 
@@ -67,14 +67,14 @@ $env:ANDROID_HOME="$env:LOCALAPPDATA\Android\Sdk"
 $env:ANDROID_SDK_ROOT=$env:ANDROID_HOME
 $env:PATH="$env:JAVA_HOME\bin;$env:ANDROID_HOME\platform-tools;$env:PATH"
 
-.\gradlew.bat :app:assembleDebug :remoteagent:assembleDebug
+.\gradlew.bat :app:assembleDebug :Glassy-Remote:assembleDebug
 ```
 
 Install:
 
 ```powershell
 adb install -r app\build\outputs\apk\debug\app-debug.apk
-adb install -r remoteagent\build\outputs\apk\debug\remoteagent-debug.apk
+adb install -r Glassy-Remote\build\outputs\apk\debug\Glassy-Remote-debug.apk
 adb shell am start -n com.glass.remoteagent/.MainActivity
 ```
 
@@ -98,7 +98,7 @@ http://127.0.0.1:8765/remote
 
 ## Security
 
-GlassyTube Remote is intended for trusted LAN or personal-hotspot use only.
+Glassy-Remote is intended for trusted LAN or personal-hotspot use only.
 
 - State-changing remote endpoints require a pairing token.
 - `/status` is read-only.

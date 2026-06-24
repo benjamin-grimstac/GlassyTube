@@ -181,7 +181,7 @@ public class AgentServer extends NanoHTTPD {
         } else {
             glassTube = forceInactiveIdle(glassTube);
         }
-        return "{\"ok\":true,\"app\":\"GlassyTube Remote\",\"ip\":\"" + escapeJson(NetworkUtils.getWifiIp(context))
+        return "{\"ok\":true,\"app\":\"Glassy-Remote\",\"ip\":\"" + escapeJson(NetworkUtils.getWifiIp(context))
                 + "\",\"volume\":" + volumeJson() + ",\"glasstube\":" + glassTube + "}";
     }
 
@@ -560,7 +560,7 @@ public class AgentServer extends NanoHTTPD {
 
     private Response notFound() {
         return response(Response.Status.NOT_FOUND, "application/json",
-                "{\"ok\":false,\"error\":\"Unknown GlassyTube Remote endpoint\"}");
+                "{\"ok\":false,\"error\":\"Unknown Glassy-Remote endpoint\"}");
     }
 
     private Response json(String body) {
@@ -586,7 +586,7 @@ public class AgentServer extends NanoHTTPD {
     private String remotePage() {
         String token = RemoteSecurity.getToken(context);
         return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>"
-                + "<title>GlassyTube Remote</title><style>" + remoteCss() + "</style></head>"
+                + "<title>Glassy-Remote</title><style>" + remoteCss() + "</style></head>"
                 + "<body><main>" + remoteMarkup() + "</main><script>" + remoteScript(token)
                 + "</script></body></html>";
     }
@@ -608,7 +608,7 @@ public class AgentServer extends NanoHTTPD {
     }
 
     private String remoteMarkup() {
-        return "<section class='top'><div class='bar'><div class='brand'>GlassyTube Remote</div><div id='state' class='pill'>Connecting</div></div></section>"
+        return "<section class='top'><div class='bar'><div class='brand'>Glassy-Remote</div><div id='state' class='pill'>Connecting</div></div></section>"
                 + "<section class='panel wake'><div class='wakeTitle'>GlassyTube is sleeping</div><div class='wakeText'>The full remote is hibernated to save Glass battery. Wake GlassyTube, then controls will appear here.</div><button class='primary' onclick='wakeGlassTube()'>Open GlassyTube</button><div class='mini'>Keep this page saved to your Home Screen for quick control.</div></section>"
                 + "<section class='panel now activeOnly'><div><div id='title' class='title'>No video loaded</div></div><div class='liveDot'></div><div id='meta' class='meta'></div><div id='toast' class='toast'></div></section>"
                 + "<nav class='tabs activeOnly'><button class='tabRemote' onclick=\"setMode('remote')\">Remote</button><button class='tabKeyboard' onclick=\"setMode('keyboard')\">Keys</button><button class='tabMore' onclick=\"setMode('more')\">More</button></nav>"

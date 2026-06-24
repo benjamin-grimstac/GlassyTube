@@ -28,7 +28,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
-        TextView title = text("GlassyTube Remote", 42, Color.WHITE);
+        TextView title = text("Glassy-Remote", 42, Color.WHITE);
         title.setGravity(Gravity.CENTER);
 
         TextView code = text("Code " + token, 25, Color.WHITE);

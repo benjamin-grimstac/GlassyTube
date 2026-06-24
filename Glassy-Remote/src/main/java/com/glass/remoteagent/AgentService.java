@@ -41,9 +41,9 @@ public class AgentService extends Service {
         }
         try {
             server = new AgentServer(this);
-            Log.i(TAG, "GlassyTube Remote listening on port " + AgentServer.PORT);
+            Log.i(TAG, "Glassy-Remote listening on port " + AgentServer.PORT);
         } catch (Exception e) {
-            Log.e(TAG, "Unable to start GlassyTube Remote server", e);
+            Log.e(TAG, "Unable to start Glassy-Remote server", e);
         }
     }
 }
