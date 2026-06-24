@@ -89,7 +89,7 @@ public class MainActivity extends Activity {
     };
 
     private enum ActionType {
-        SEARCH, QUEUE, RECENT, FAVORITES, RECEIVER, PLAY_URL, PLAYLIST_URL, CHANNEL_URL, NONE
+        SEARCH, QUEUE, RECENT, FAVORITES, PLAY_URL, PLAYLIST_URL, CHANNEL_URL, NONE
     }
 
     private enum ScreenMode {
@@ -288,21 +288,12 @@ public class MainActivity extends Activity {
     private void showHome() {
         screenMode = ScreenMode.HOME;
         clearCards();
-        String ip = NetworkUtils.getWifiIp(this);
         addCard("Search YouTube", "Tap to speak a search", ActionType.SEARCH, null, null);
         addCard("Queue", VideoStore.getQueue(this).size() + " videos waiting", ActionType.QUEUE, null, null);
         addCard("Recent", VideoStore.getHistory(this).size() + " watched/opened videos", ActionType.RECENT, null, null);
         addCard("Favorites", VideoStore.getFavorites(this).size() + " saved videos", ActionType.FAVORITES, null, null);
-        addCard("Send to Glass", receiverText(ip), ActionType.RECEIVER, null, null);
         notifyCards();
         selectFirstCard();
-    }
-
-    private String receiverText(String ip) {
-        if (ip.length() == 0) {
-            return "Connect Glass to Wi-Fi, then reopen this card.";
-        }
-        return "Open http://" + ip + ":" + GlassTubeServer.PORT;
     }
 
     private void handleAction(CardAction action, int position) {
@@ -318,9 +309,6 @@ public class MainActivity extends Activity {
                 break;
             case FAVORITES:
                 showStoredList("Favorites", VideoStore.getFavorites(this), false);
-                break;
-            case RECEIVER:
-                showReceiverSetup();
                 break;
             case PLAY_URL:
                 openVideo(action.url, action.title, playlistUrl.contains("list="), position);
