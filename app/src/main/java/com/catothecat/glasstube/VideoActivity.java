@@ -104,6 +104,8 @@ public class VideoActivity extends Activity {
     private DefaultTrackSelector trackSelector;
     private boolean audioOverrideApplied = false;
     private long lastPlayingStateSaveAtMs = 0;
+    private long initialSeekMs = C.TIME_UNSET;
+    private boolean initialSeekApplied = true;
     private int tapCount = 0;
     private final Handler stateHandler = new Handler();
     private final Runnable singleTapRunnable = new Runnable() {
@@ -120,6 +122,7 @@ public class VideoActivity extends Activity {
                 return;
             }
             savePlayerState(stateToString(player.getPlaybackState()));
+            applyInitialSeekIfNeeded();
             updateOverlayControls();
             stateHandler.postDelayed(this, PLAYING_STATE_SAVE_INTERVAL_MS);
         }
@@ -172,8 +175,11 @@ public class VideoActivity extends Activity {
             videoTitle = "YouTube video";
         }
         playlist = intent.getBooleanExtra("playlist", false);
+        initialSeekMs = extractTimestampMs(videoUrl);
+        initialSeekApplied = initialSeekMs <= 0 || initialSeekMs == C.TIME_UNSET;
         videoUrl = normalizeYouTubeUrl(videoUrl);
-        AppLog.i(this, TAG, "Playing video=" + videoUrl);
+        AppLog.i(this, TAG, "Playing video=" + videoUrl
+                + (initialSeekApplied ? "" : " initialSeekMs=" + initialSeekMs));
         VideoStore.savePlaybackState(this, videoTitle, videoUrl, "loading", 0, 0);
         task = new FetchVideoStreamsTask().execute();
     }
@@ -657,6 +663,9 @@ public class VideoActivity extends Activity {
                 if (state == ExoPlayer.STATE_READY || state == ExoPlayer.STATE_ENDED) {
                     hideBufferingIndicator();
                 }
+                if (state == ExoPlayer.STATE_READY) {
+                    applyInitialSeekIfNeeded();
+                }
                 updateOverlayControls();
                 if (state == ExoPlayer.STATE_ENDED && playlist) {
                     setResult(RESULT_OK);
@@ -1063,6 +1072,22 @@ public class VideoActivity extends Activity {
         }
     }
 
+    private void applyInitialSeekIfNeeded() {
+        if (initialSeekApplied || player == null || initialSeekMs <= 0 || initialSeekMs == C.TIME_UNSET) {
+            return;
+        }
+        long duration = player.getDuration();
+        if (duration <= 0 || duration == C.TIME_UNSET) {
+            return;
+        }
+        long target = clamp(initialSeekMs, 0, Math.max(0, duration - 1000));
+        AppLog.i(this, TAG, "Applying URL timestamp seek=" + target);
+        player.seekTo(target);
+        initialSeekApplied = true;
+        showControlsTemporarily();
+        updateOverlayControls();
+    }
+
     private void playNextQueuedOrFinish() {
         VideoStore.Entry next = VideoStore.pollQueue(this);
         if (next == null) {
@@ -1305,7 +1330,11 @@ public class VideoActivity extends Activity {
         if (videoId == null) {
             return rawUrl == null ? "" : rawUrl;
         }
-        return "https://www.youtube.com/watch?v=" + videoId;
+        long timestampMs = extractTimestampMs(rawUrl);
+        String timestamp = timestampMs > 0 && timestampMs != C.TIME_UNSET
+                ? "&t=" + Math.max(1, timestampMs / 1000) + "s"
+                : "";
+        return "https://www.youtube.com/watch?v=" + videoId + timestamp;
     }
 
     private String extractYouTubeId(String rawUrl) {
@@ -1351,6 +1380,83 @@ public class VideoActivity extends Activity {
             clean = clean.substring(0, cut);
         }
         return clean.length() == 11 ? clean : null;
+    }
+
+    private long extractTimestampMs(String rawUrl) {
+        if (rawUrl == null || rawUrl.length() == 0) {
+            return C.TIME_UNSET;
+        }
+        Uri uri = Uri.parse(rawUrl);
+        String[] keys = new String[]{"t", "start", "time_continue"};
+        for (String key : keys) {
+            long parsed = parseTimestampValue(uri.getQueryParameter(key));
+            if (parsed > 0) {
+                return parsed;
+            }
+        }
+        String fragment = uri.getFragment();
+        if (fragment == null || fragment.length() == 0) {
+            return C.TIME_UNSET;
+        }
+        if (fragment.contains("=")) {
+            Uri fragmentUri = Uri.parse("https://glassytube.local/?" + fragment);
+            for (String key : keys) {
+                long parsed = parseTimestampValue(fragmentUri.getQueryParameter(key));
+                if (parsed > 0) {
+                    return parsed;
+                }
+            }
+        }
+        return parseTimestampValue(fragment);
+    }
+
+    private long parseTimestampValue(String value) {
+        if (value == null) {
+            return C.TIME_UNSET;
+        }
+        String clean = value.trim().toLowerCase(Locale.US);
+        if (clean.length() == 0) {
+            return C.TIME_UNSET;
+        }
+        if (clean.contains(":")) {
+            String[] parts = clean.split(":");
+            long seconds = 0;
+            for (String part : parts) {
+                try {
+                    seconds = seconds * 60 + Long.parseLong(part.trim());
+                } catch (NumberFormatException e) {
+                    return C.TIME_UNSET;
+                }
+            }
+            return seconds > 0 ? seconds * 1000 : C.TIME_UNSET;
+        }
+
+        long seconds = 0;
+        StringBuilder number = new StringBuilder();
+        boolean sawUnit = false;
+        for (int i = 0; i < clean.length(); i++) {
+            char c = clean.charAt(i);
+            if (c >= '0' && c <= '9') {
+                number.append(c);
+                continue;
+            }
+            if ((c == 'h' || c == 'm' || c == 's') && number.length() > 0) {
+                long n = Long.parseLong(number.toString());
+                if (c == 'h') {
+                    seconds += n * 3600;
+                } else if (c == 'm') {
+                    seconds += n * 60;
+                } else {
+                    seconds += n;
+                }
+                number.setLength(0);
+                sawUnit = true;
+            }
+        }
+        if (number.length() > 0) {
+            seconds += Long.parseLong(number.toString());
+        }
+        return seconds > 0 || sawUnit ? seconds * 1000 : C.TIME_UNSET;
     }
 
     @SuppressLint("WrongConstant")
