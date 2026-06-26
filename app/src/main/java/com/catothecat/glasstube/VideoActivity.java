@@ -94,9 +94,9 @@ public class VideoActivity extends Activity {
     AsyncTask<Void, Void, StreamInfo> task;
     private String backgroundResolvedHlsUrl;
     private ImageView captionIcon;
-    private ImageButton playButton;
-    private ImageButton pauseButton;
+    private ImageButton playPauseButton;
     private LinearLayout controlBar;
+    private TextView timeLabel;
     private TextView positionText;
     private TextView durationText;
     private SeekBar progressSeekBar;
@@ -119,6 +119,14 @@ public class VideoActivity extends Activity {
         public void run() {
             tapCount = 0;
             togglePlayPause();
+        }
+    };
+    private final Runnable doubleTapRunnable = new Runnable() {
+        @Override
+        public void run() {
+            tapCount = 0;
+            toggleCaptions();
+            showControlsTemporarily();
         }
     };
     private final Runnable stateTicker = new Runnable() {
@@ -699,7 +707,13 @@ public class VideoActivity extends Activity {
                     hideBufferingIndicator();
                 }
                 updateOverlayControls();
-                savePlayerState(isPlaying ? "playing" : "paused");
+                savePlayerState(stateToString(player.getPlaybackState()));
+            }
+
+            @Override
+            public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
+                updateOverlayControls();
+                savePlayerState(stateToString(player.getPlaybackState()));
             }
 
             @Override
@@ -898,6 +912,7 @@ public class VideoActivity extends Activity {
         }
         if (playerView != null) {
             playerView.removeCallbacks(singleTapRunnable);
+            playerView.removeCallbacks(doubleTapRunnable);
         }
         stateHandler.removeCallbacks(stateTicker);
         if (task != null) {
@@ -973,30 +988,31 @@ public class VideoActivity extends Activity {
         }
         tapCount++;
         playerView.removeCallbacks(singleTapRunnable);
+        playerView.removeCallbacks(doubleTapRunnable);
         if (tapCount >= 3) {
             tapCount = 0;
             volumeMode = !volumeMode;
             showVolumeMode();
             return;
         }
-        playerView.postDelayed(singleTapRunnable, 280);
+        if (tapCount == 2) {
+            playerView.postDelayed(doubleTapRunnable, 280);
+        } else {
+            playerView.postDelayed(singleTapRunnable, 280);
+        }
     }
 
     private void togglePlayPause() {
         if (player == null) {
             return;
         }
-        if (player.isPlaying()) {
+        if (player.getPlayWhenReady()) {
             player.pause();
-            if (playerView != null) {
-                playerView.onPause();
-            }
         } else {
             player.play();
-            if (playerView != null) {
-                playerView.onResume();
-            }
         }
+        updateOverlayControls();
+        showControlsTemporarily();
     }
 
     private void showVolumeMode() {
@@ -1023,7 +1039,7 @@ public class VideoActivity extends Activity {
             return;
         }
         if ("play_pause".equals(command) || "play".equals(command) || "pause".equals(command)) {
-            if ("play".equals(command) || !player.isPlaying()) {
+            if ("play".equals(command) || (!"pause".equals(command) && !player.getPlayWhenReady())) {
                 player.play();
             } else {
                 player.pause();
@@ -1050,7 +1066,8 @@ public class VideoActivity extends Activity {
             returnToGlassTube();
         }
         showControlsTemporarily();
-        savePlayerState(player.isPlaying() ? "playing" : "paused");
+        updateOverlayControls();
+        savePlayerState(stateToString(player.getPlaybackState()));
     }
 
     private void returnToGlassTube() {
@@ -1130,6 +1147,7 @@ public class VideoActivity extends Activity {
             captionIcon.setImageResource(subtitlesEnabled ?
                     R.drawable.cc_enabled : R.drawable.cc_disabled);
         }
+        showControlsTemporarily();
         AppLog.d(this, TAG, "Subtitles " + (subtitlesEnabled ? "enabled" : "disabled"));
     }
 
@@ -1151,7 +1169,7 @@ public class VideoActivity extends Activity {
             return "buffering";
         }
         if (state == ExoPlayer.STATE_READY) {
-            return player != null && player.isPlaying() ? "playing" : "paused";
+            return player != null && player.getPlayWhenReady() ? "playing" : "paused";
         }
         if (state == ExoPlayer.STATE_ENDED) {
             return "ended";
@@ -1251,22 +1269,13 @@ public class VideoActivity extends Activity {
     private void bindOverlayControls() {
         captionIcon = findViewById(R.id.exo_caption_icon);
         controlBar = findViewById(R.id.control_bar);
-        playButton = findViewById(R.id.exo_play);
-        pauseButton = findViewById(R.id.exo_pause);
+        playPauseButton = findViewById(R.id.glass_play_pause);
+        timeLabel = findViewById(R.id.glass_time_label);
         positionText = findViewById(R.id.exo_position);
         progressSeekBar = findViewById(R.id.glass_progress);
         durationText = findViewById(R.id.exo_duration);
-        if (playButton != null) {
-            playButton.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    togglePlayPause();
-                    showControlsTemporarily();
-                }
-            });
-        }
-        if (pauseButton != null) {
-            pauseButton.setOnClickListener(new View.OnClickListener() {
+        if (playPauseButton != null) {
+            playPauseButton.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
                     togglePlayPause();
@@ -1324,20 +1333,29 @@ public class VideoActivity extends Activity {
             if (durationText != null) {
                 durationText.setText("--:--");
             }
+            if (timeLabel != null) {
+                timeLabel.setText("0:00 / --:--");
+            }
             if (progressSeekBar != null) {
                 progressSeekBar.setEnabled(false);
                 progressSeekBar.setProgress(0);
                 progressSeekBar.setAlpha(0.35f);
             }
+            if (playPauseButton != null) {
+                playPauseButton.setImageResource(R.drawable.play);
+                playPauseButton.setContentDescription(getString(R.string.control_play));
+                playPauseButton.setAlpha(0.55f);
+            }
             return;
         }
         int playbackState = player.getPlaybackState();
         boolean wantsPlayback = player.getPlayWhenReady() && playbackState != ExoPlayer.STATE_ENDED;
-        if (playButton != null) {
-            playButton.setVisibility(wantsPlayback ? View.GONE : View.VISIBLE);
-        }
-        if (pauseButton != null) {
-            pauseButton.setVisibility(wantsPlayback ? View.VISIBLE : View.GONE);
+        if (playPauseButton != null) {
+            playPauseButton.setVisibility(View.VISIBLE);
+            playPauseButton.setAlpha(1f);
+            playPauseButton.setImageResource(wantsPlayback ? R.drawable.pause : R.drawable.play);
+            playPauseButton.setContentDescription(getString(wantsPlayback ?
+                    R.string.control_pause : R.string.control_play));
         }
         long position = player.getCurrentPosition();
         long duration = player.getDuration();
@@ -1346,6 +1364,10 @@ public class VideoActivity extends Activity {
         }
         if (durationText != null) {
             durationText.setText(duration > 0 && duration != C.TIME_UNSET ? formatDuration(duration) : "LIVE");
+        }
+        if (timeLabel != null) {
+            String durationLabel = duration > 0 && duration != C.TIME_UNSET ? formatDuration(duration) : "LIVE";
+            timeLabel.setText(formatDuration(position) + " / " + durationLabel);
         }
         if (progressSeekBar != null) {
             boolean seekable = duration > 0 && duration != C.TIME_UNSET;
