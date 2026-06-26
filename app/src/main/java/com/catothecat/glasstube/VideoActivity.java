@@ -108,6 +108,7 @@ public class VideoActivity extends Activity {
     private long twoFingerStartPositionMs = 0;
     private DefaultTrackSelector trackSelector;
     private boolean audioOverrideApplied = false;
+    private boolean streamInfoLive = false;
     private long lastPlayingStateSaveAtMs = 0;
     private long lastPeriodicStateSaveAtMs = 0;
     private long initialSeekMs = C.TIME_UNSET;
@@ -196,6 +197,7 @@ public class VideoActivity extends Activity {
         initialSeekMs = extractTimestampMs(videoUrl);
         initialSeekApplied = initialSeekMs <= 0 || initialSeekMs == C.TIME_UNSET;
         videoUrl = normalizeYouTubeUrl(videoUrl);
+        streamInfoLive = false;
         AppLog.i(this, TAG, "Playing video=" + videoUrl
                 + (initialSeekApplied ? "" : " initialSeekMs=" + initialSeekMs));
         VideoStore.savePlaybackState(this, videoTitle, videoUrl, "loading", 0, 0);
@@ -286,7 +288,8 @@ public class VideoActivity extends Activity {
                 }
                 VideoStore.addHistory(VideoActivity.this, videoTitle, videoUrl);
                 // Check if it's a live stream
-                if (streamInfo.getStreamType().equals(StreamType.LIVE_STREAM)) {
+                streamInfoLive = StreamType.LIVE_STREAM.equals(streamInfo.getStreamType());
+                if (streamInfoLive) {
                     // For live streams, use the HLS manifest URL if available
                     String manifestUrl = streamInfo.getHlsUrl();
                     if (manifestUrl != null && !manifestUrl.isEmpty()) {
@@ -659,6 +662,8 @@ public class VideoActivity extends Activity {
                         .setMaxVideoBitrate(GLASS_TARGET_VIDEO_BITRATE)
                         .setMaxAudioChannelCount(2)
                         .setPreferredAudioLanguage("en")
+                        .setPreferredTextLanguage("en")
+                        .setSelectUndeterminedTextLanguage(true)
                         .build());
 
         AudioAttributes audioAttributes = new AudioAttributes.Builder()
@@ -1009,6 +1014,7 @@ public class VideoActivity extends Activity {
         if (player.getPlayWhenReady()) {
             player.pause();
         } else {
+            seekToLiveEdgeIfNeeded();
             player.play();
         }
         updateOverlayControls();
@@ -1040,10 +1046,14 @@ public class VideoActivity extends Activity {
         }
         if ("play_pause".equals(command) || "play".equals(command) || "pause".equals(command)) {
             if ("play".equals(command) || (!"pause".equals(command) && !player.getPlayWhenReady())) {
+                seekToLiveEdgeIfNeeded();
                 player.play();
             } else {
                 player.pause();
             }
+        } else if ("live".equals(command) || "seek_live".equals(command) || "seek_to_live".equals(command)) {
+            seekToLiveEdgeIfNeeded();
+            player.play();
         } else if ("seek_forward".equals(command)) {
             seekBy(10000);
         } else if ("seek_back".equals(command)) {
@@ -1082,6 +1092,9 @@ public class VideoActivity extends Activity {
     }
 
     private void seekBy(long deltaMs) {
+        if (player == null || isLiveStream()) {
+            return;
+        }
         long duration = player.getDuration();
         long max = duration <= 0 ? Long.MAX_VALUE : duration;
         player.seekTo(clamp(player.getCurrentPosition() + deltaMs, 0, max));
@@ -1089,6 +1102,9 @@ public class VideoActivity extends Activity {
 
     private void seekTo(String millisText) {
         try {
+            if (player == null || isLiveStream()) {
+                return;
+            }
             long duration = player.getDuration();
             if (duration <= 0 || duration == C.TIME_UNSET) {
                 return;
@@ -1096,6 +1112,18 @@ public class VideoActivity extends Activity {
             long target = Long.parseLong(millisText);
             player.seekTo(clamp(target, 0, duration));
         } catch (NumberFormatException ignored) {
+        }
+    }
+
+    private void seekToLiveEdgeIfNeeded() {
+        if (player == null || !isLiveStream()) {
+            return;
+        }
+        try {
+            player.seekToDefaultPosition();
+            AppLog.d(this, TAG, "Seeking live stream to live edge");
+        } catch (RuntimeException e) {
+            AppLog.w(this, TAG, "Unable to seek live stream to live edge", e);
         }
     }
 
@@ -1154,6 +1182,10 @@ public class VideoActivity extends Activity {
     private void savePlayerState(String state) {
         long position = player == null ? 0 : player.getCurrentPosition();
         long duration = player == null || player.getDuration() < 0 ? 0 : player.getDuration();
+        if (isLiveStream()) {
+            position = 0;
+            duration = 0;
+        }
         if ("playing".equals(state)) {
             long now = SystemClock.elapsedRealtime();
             if (now - lastPlayingStateSaveAtMs < PLAYING_STATE_SAVE_INTERVAL_MS) {
@@ -1196,7 +1228,7 @@ public class VideoActivity extends Activity {
     }
 
     private boolean handleTwoFingerScrub(MotionEvent event) {
-        if (player == null || player.getDuration() <= 0) {
+        if (player == null || isLiveStream() || player.getDuration() <= 0) {
             return false;
         }
         int pointerCount = event.getPointerCount();
@@ -1359,18 +1391,25 @@ public class VideoActivity extends Activity {
         }
         long position = player.getCurrentPosition();
         long duration = player.getDuration();
+        boolean liveStream = isLiveStream();
+        boolean seekable = !liveStream
+                && isCurrentMediaSeekable()
+                && duration > 0
+                && duration != C.TIME_UNSET;
         if (positionText != null) {
-            positionText.setText(formatDuration(position));
+            positionText.setText(liveStream ? "LIVE" : formatDuration(position));
         }
         if (durationText != null) {
-            durationText.setText(duration > 0 && duration != C.TIME_UNSET ? formatDuration(duration) : "LIVE");
+            durationText.setText(seekable ? formatDuration(duration) : "LIVE");
         }
         if (timeLabel != null) {
-            String durationLabel = duration > 0 && duration != C.TIME_UNSET ? formatDuration(duration) : "LIVE";
-            timeLabel.setText(formatDuration(position) + " / " + durationLabel);
+            if (liveStream) {
+                timeLabel.setText("LIVE");
+            } else {
+                timeLabel.setText(formatDuration(position) + " / " + formatDuration(duration));
+            }
         }
         if (progressSeekBar != null) {
-            boolean seekable = duration > 0 && duration != C.TIME_UNSET;
             progressSeekBar.setEnabled(seekable);
             progressSeekBar.setAlpha(seekable ? 1f : 0.35f);
             if (!overlaySeekBarDragging) {
@@ -1378,6 +1417,14 @@ public class VideoActivity extends Activity {
                 progressSeekBar.setProgress(progress);
             }
         }
+    }
+
+    private boolean isCurrentMediaSeekable() {
+        return player != null && player.isCurrentMediaItemSeekable();
+    }
+
+    private boolean isLiveStream() {
+        return streamInfoLive || player != null && player.isCurrentMediaItemLive();
     }
 
     private String formatDuration(long millis) {
