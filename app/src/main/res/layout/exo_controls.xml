@@ -44,6 +44,7 @@
             android:layout_marginEnd="8dp"
             android:src="@drawable/pause"
             android:background="@android:color/transparent"
+            android:visibility="gone"
             android:contentDescription="@string/control_pause"/>
 
         <ImageView
@@ -55,29 +56,34 @@
             android:contentDescription="@string/control_captions"/>
 
         <TextView android:id="@id/exo_position"
-            android:layout_width="wrap_content"
+            android:layout_width="44dp"
             android:layout_height="wrap_content"
             android:textSize="14sp"
             android:textStyle="bold"
             android:paddingLeft="4dp"
             android:paddingRight="4dp"
+            android:gravity="center"
             android:includeFontPadding="false"
-            android:textColor="#FFBEBEBE"/>
+            android:textColor="#FFFFFFFF"/>
 
-        <View android:id="@id/exo_progress_placeholder"
+        <SeekBar android:id="@id/glass_progress"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="26dp"/>
+            android:layout_height="26dp"
+            android:max="1000"
+            android:paddingLeft="4dp"
+            android:paddingRight="4dp"/>
 
         <TextView android:id="@id/exo_duration"
-            android:layout_width="wrap_content"
+            android:layout_width="48dp"
             android:layout_height="wrap_content"
             android:textSize="14sp"
             android:textStyle="bold"
             android:paddingLeft="4dp"
             android:paddingRight="4dp"
+            android:gravity="center"
             android:includeFontPadding="false"
-            android:textColor="#FFBEBEBE"/>
+            android:textColor="#FFFFFFFF"/>
 
     </LinearLayout>
 

@@ -20,6 +20,7 @@ import android.view.WindowManager;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -85,6 +86,8 @@ public class VideoActivity extends Activity {
     private static final int GLASS_TARGET_VIDEO_WIDTH = 640;
     private static final int GLASS_TARGET_VIDEO_HEIGHT = 360;
     private static final int GLASS_TARGET_VIDEO_BITRATE = 1100000;
+    private static final long OVERLAY_TICK_INTERVAL_MS = 500;
+    private static final long CONTROL_HIDE_DELAY_MS = 5000;
     String videoUrl = "";
     String videoTitle = "YouTube video";
     Boolean playlist;
@@ -96,14 +99,17 @@ public class VideoActivity extends Activity {
     private LinearLayout controlBar;
     private TextView positionText;
     private TextView durationText;
+    private SeekBar progressSeekBar;
     private boolean controlsVisible = true;
     private boolean twoFingerScrubbing = false;
     private boolean volumeMode = false;
+    private boolean overlaySeekBarDragging = false;
     private float twoFingerStartX = 0;
     private long twoFingerStartPositionMs = 0;
     private DefaultTrackSelector trackSelector;
     private boolean audioOverrideApplied = false;
     private long lastPlayingStateSaveAtMs = 0;
+    private long lastPeriodicStateSaveAtMs = 0;
     private long initialSeekMs = C.TIME_UNSET;
     private boolean initialSeekApplied = true;
     private int tapCount = 0;
@@ -121,10 +127,14 @@ public class VideoActivity extends Activity {
             if (player == null) {
                 return;
             }
-            savePlayerState(stateToString(player.getPlaybackState()));
             applyInitialSeekIfNeeded();
             updateOverlayControls();
-            stateHandler.postDelayed(this, PLAYING_STATE_SAVE_INTERVAL_MS);
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastPeriodicStateSaveAtMs >= PLAYING_STATE_SAVE_INTERVAL_MS) {
+                lastPeriodicStateSaveAtMs = now;
+                savePlayerState(stateToString(player.getPlaybackState()));
+            }
+            stateHandler.postDelayed(this, OVERLAY_TICK_INTERVAL_MS);
         }
     };
     private final BroadcastReceiver remoteReceiver = new BroadcastReceiver() {
@@ -1214,10 +1224,10 @@ public class VideoActivity extends Activity {
         setControlsVisible(true);
         if (controlBar != null) {
             controlBar.removeCallbacks(hideControlsRunnable);
-            controlBar.postDelayed(hideControlsRunnable, 3000);
+            controlBar.postDelayed(hideControlsRunnable, CONTROL_HIDE_DELAY_MS);
         } else if (playerView != null) {
             playerView.removeCallbacks(hideControlsRunnable);
-            playerView.postDelayed(hideControlsRunnable, 3000);
+            playerView.postDelayed(hideControlsRunnable, CONTROL_HIDE_DELAY_MS);
         }
     }
 
@@ -1244,6 +1254,7 @@ public class VideoActivity extends Activity {
         playButton = findViewById(R.id.exo_play);
         pauseButton = findViewById(R.id.exo_pause);
         positionText = findViewById(R.id.exo_position);
+        progressSeekBar = findViewById(R.id.glass_progress);
         durationText = findViewById(R.id.exo_duration);
         if (playButton != null) {
             playButton.setOnClickListener(new View.OnClickListener() {
@@ -1263,6 +1274,45 @@ public class VideoActivity extends Activity {
                 }
             });
         }
+        if (progressSeekBar != null) {
+            progressSeekBar.setMax(1000);
+            progressSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                @Override
+                public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                    if (!fromUser || player == null) {
+                        return;
+                    }
+                    long duration = player.getDuration();
+                    if (duration <= 0 || duration == C.TIME_UNSET) {
+                        return;
+                    }
+                    long target = (duration * progress) / seekBar.getMax();
+                    if (positionText != null) {
+                        positionText.setText(formatDuration(target));
+                    }
+                }
+
+                @Override
+                public void onStartTrackingTouch(SeekBar seekBar) {
+                    overlaySeekBarDragging = true;
+                    showControlsTemporarily();
+                }
+
+                @Override
+                public void onStopTrackingTouch(SeekBar seekBar) {
+                    if (player != null) {
+                        long duration = player.getDuration();
+                        if (duration > 0 && duration != C.TIME_UNSET) {
+                            long target = (duration * seekBar.getProgress()) / seekBar.getMax();
+                            player.seekTo(clamp(target, 0, duration));
+                        }
+                    }
+                    overlaySeekBarDragging = false;
+                    showControlsTemporarily();
+                    updateOverlayControls();
+                }
+            });
+        }
         updateOverlayControls();
     }
 
@@ -1274,21 +1324,37 @@ public class VideoActivity extends Activity {
             if (durationText != null) {
                 durationText.setText("--:--");
             }
+            if (progressSeekBar != null) {
+                progressSeekBar.setEnabled(false);
+                progressSeekBar.setProgress(0);
+                progressSeekBar.setAlpha(0.35f);
+            }
             return;
         }
-        boolean playing = player.isPlaying();
+        int playbackState = player.getPlaybackState();
+        boolean wantsPlayback = player.getPlayWhenReady() && playbackState != ExoPlayer.STATE_ENDED;
         if (playButton != null) {
-            playButton.setVisibility(playing ? View.GONE : View.VISIBLE);
+            playButton.setVisibility(wantsPlayback ? View.GONE : View.VISIBLE);
         }
         if (pauseButton != null) {
-            pauseButton.setVisibility(playing ? View.VISIBLE : View.GONE);
+            pauseButton.setVisibility(wantsPlayback ? View.VISIBLE : View.GONE);
         }
+        long position = player.getCurrentPosition();
+        long duration = player.getDuration();
         if (positionText != null) {
-            positionText.setText(formatDuration(player.getCurrentPosition()));
+            positionText.setText(formatDuration(position));
         }
         if (durationText != null) {
-            long duration = player.getDuration();
             durationText.setText(duration > 0 && duration != C.TIME_UNSET ? formatDuration(duration) : "LIVE");
+        }
+        if (progressSeekBar != null) {
+            boolean seekable = duration > 0 && duration != C.TIME_UNSET;
+            progressSeekBar.setEnabled(seekable);
+            progressSeekBar.setAlpha(seekable ? 1f : 0.35f);
+            if (!overlaySeekBarDragging) {
+                int progress = seekable ? (int) clamp((position * progressSeekBar.getMax()) / duration, 0, progressSeekBar.getMax()) : 0;
+                progressSeekBar.setProgress(progress);
+            }
         }
     }
 

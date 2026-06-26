@@ -13,7 +13,6 @@
         android:layout_height="match_parent"
         android:visibility="visible"
         app:use_controller="false"
-        app:controller_layout_id="@layout/exo_controls"
         app:surface_type="spherical_gl_surface_view"/>
 
     <include layout="@layout/exo_controls" />
