@@ -16,4 +16,6 @@
         app:surface_type="texture_view"
         app:controller_layout_id="@layout/exo_controls" />
 
+    <include layout="@layout/exo_controls" />
+
 </FrameLayout>

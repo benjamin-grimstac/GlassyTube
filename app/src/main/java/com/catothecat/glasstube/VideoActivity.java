@@ -17,8 +17,10 @@ import android.util.TypedValue;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import com.google.android.exoplayer2.C;
@@ -89,7 +91,11 @@ public class VideoActivity extends Activity {
     AsyncTask<Void, Void, StreamInfo> task;
     private String backgroundResolvedHlsUrl;
     private ImageView captionIcon;
+    private ImageButton playButton;
+    private ImageButton pauseButton;
     private LinearLayout controlBar;
+    private TextView positionText;
+    private TextView durationText;
     private boolean controlsVisible = true;
     private boolean twoFingerScrubbing = false;
     private boolean volumeMode = false;
@@ -114,6 +120,7 @@ public class VideoActivity extends Activity {
                 return;
             }
             savePlayerState(stateToString(player.getPlaybackState()));
+            updateOverlayControls();
             stateHandler.postDelayed(this, PLAYING_STATE_SAVE_INTERVAL_MS);
         }
     };
@@ -128,10 +135,7 @@ public class VideoActivity extends Activity {
     private final Runnable hideControlsRunnable = new Runnable() {
         @Override
         public void run() {
-            if (controlBar != null) {
-                controlBar.setVisibility(View.GONE);
-                controlsVisible = false;
-            }
+            setControlsVisible(false);
         }
     };
 
@@ -151,6 +155,7 @@ public class VideoActivity extends Activity {
         }
         registerRemoteReceiver();
         playerView = findViewById(R.id.playerView);
+        configurePlayerControls();
         playerView.setSystemUiVisibility(
                 View.SYSTEM_UI_FLAG_IMMERSIVE
                         | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -609,9 +614,9 @@ public class VideoActivity extends Activity {
             setContentView(R.layout.video_view_360);
             mGestureDetector = createGestureDetector(this);
             playerView = findViewById(R.id.playerView);
+            configurePlayerControls();
         }
-        captionIcon = playerView.findViewById(R.id.exo_caption_icon);
-        controlBar = playerView.findViewById(R.id.control_bar);
+        bindOverlayControls();
 
         LoadControl loadControl = new DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
@@ -652,6 +657,7 @@ public class VideoActivity extends Activity {
                 if (state == ExoPlayer.STATE_READY || state == ExoPlayer.STATE_ENDED) {
                     hideBufferingIndicator();
                 }
+                updateOverlayControls();
                 if (state == ExoPlayer.STATE_ENDED && playlist) {
                     setResult(RESULT_OK);
                     finish();
@@ -673,6 +679,7 @@ public class VideoActivity extends Activity {
                 if (isPlaying) {
                     hideBufferingIndicator();
                 }
+                updateOverlayControls();
                 savePlayerState(isPlaying ? "playing" : "paused");
             }
 
@@ -693,8 +700,6 @@ public class VideoActivity extends Activity {
         subtitleView = playerView.getSubtitleView();
         subtitleView.setFixedTextSize(TypedValue.COMPLEX_UNIT_DIP, 24);
         subtitleView.setVisibility(View.GONE);
-        playerView.setControllerShowTimeoutMs(0);
-        playerView.setControllerHideOnTouch(false);
         showControlsTemporarily();
         if (mediaSource != null) {
             player.setMediaSource(mediaSource);
@@ -895,13 +900,8 @@ public class VideoActivity extends Activity {
         gestureDetector.setBaseListener( new GestureDetector.BaseListener() {
             @Override
             public boolean onGesture(Gesture gesture) {
-                if (controlBar != null) {
-                    if (!controlsVisible) {
-                        controlBar.setVisibility(View.VISIBLE);
-                        controlsVisible = true;
-                        // Auto-hide after delay
-                        showControlsTemporarily();
-                    }
+                if (!controlsVisible) {
+                    showControlsTemporarily();
                 }
                 if (player == null) {
                     return false;
@@ -1183,13 +1183,102 @@ public class VideoActivity extends Activity {
     }
 
     private void showControlsTemporarily() {
-        if (controlBar == null) {
+        if (playerView == null && controlBar == null) {
             return;
         }
-        controlBar.setVisibility(View.VISIBLE);
-        controlsVisible = true;
-        controlBar.removeCallbacks(hideControlsRunnable);
-        controlBar.postDelayed(hideControlsRunnable, 3000);
+        setControlsVisible(true);
+        if (controlBar != null) {
+            controlBar.removeCallbacks(hideControlsRunnable);
+            controlBar.postDelayed(hideControlsRunnable, 3000);
+        } else if (playerView != null) {
+            playerView.removeCallbacks(hideControlsRunnable);
+            playerView.postDelayed(hideControlsRunnable, 3000);
+        }
+    }
+
+    private void setControlsVisible(boolean visible) {
+        if (controlBar != null) {
+            controlBar.setVisibility(visible ? View.VISIBLE : View.GONE);
+            if (visible) {
+                controlBar.removeCallbacks(hideControlsRunnable);
+            }
+        }
+        controlsVisible = visible;
+    }
+
+    private void configurePlayerControls() {
+        if (playerView == null) {
+            return;
+        }
+        playerView.setUseController(false);
+    }
+
+    private void bindOverlayControls() {
+        captionIcon = findViewById(R.id.exo_caption_icon);
+        controlBar = findViewById(R.id.control_bar);
+        playButton = findViewById(R.id.exo_play);
+        pauseButton = findViewById(R.id.exo_pause);
+        positionText = findViewById(R.id.exo_position);
+        durationText = findViewById(R.id.exo_duration);
+        if (playButton != null) {
+            playButton.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    togglePlayPause();
+                    showControlsTemporarily();
+                }
+            });
+        }
+        if (pauseButton != null) {
+            pauseButton.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    togglePlayPause();
+                    showControlsTemporarily();
+                }
+            });
+        }
+        updateOverlayControls();
+    }
+
+    private void updateOverlayControls() {
+        if (player == null) {
+            if (positionText != null) {
+                positionText.setText("0:00");
+            }
+            if (durationText != null) {
+                durationText.setText("--:--");
+            }
+            return;
+        }
+        boolean playing = player.isPlaying();
+        if (playButton != null) {
+            playButton.setVisibility(playing ? View.GONE : View.VISIBLE);
+        }
+        if (pauseButton != null) {
+            pauseButton.setVisibility(playing ? View.VISIBLE : View.GONE);
+        }
+        if (positionText != null) {
+            positionText.setText(formatDuration(player.getCurrentPosition()));
+        }
+        if (durationText != null) {
+            long duration = player.getDuration();
+            durationText.setText(duration > 0 && duration != C.TIME_UNSET ? formatDuration(duration) : "LIVE");
+        }
+    }
+
+    private String formatDuration(long millis) {
+        if (millis < 0 || millis == C.TIME_UNSET) {
+            return "0:00";
+        }
+        long totalSeconds = millis / 1000;
+        long seconds = totalSeconds % 60;
+        long minutes = (totalSeconds / 60) % 60;
+        long hours = totalSeconds / 3600;
+        if (hours > 0) {
+            return String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds);
+        }
+        return String.format(Locale.US, "%d:%02d", minutes, seconds);
     }
 
     private List<String> extractorCandidates(String rawUrl) {
