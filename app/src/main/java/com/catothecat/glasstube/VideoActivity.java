@@ -37,6 +37,7 @@ import com.google.android.exoplayer2.audio.AudioAttributes;
 import com.google.android.exoplayer2.source.MediaSource;
 import com.google.android.exoplayer2.source.MergingMediaSource;
 import com.google.android.exoplayer2.source.ProgressiveMediaSource;
+import com.google.android.exoplayer2.source.SingleSampleMediaSource;
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
 import com.google.android.exoplayer2.trackselection.MappingTrackSelector;
 import com.google.android.exoplayer2.ui.PlayerView;
@@ -778,11 +779,44 @@ public class VideoActivity extends Activity {
 
     private void playMergedVideo(MediaItem videoItem, MediaItem audioItem, Boolean sphereView) {
         DefaultDataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(this);
-        MediaSource videoSource = new ProgressiveMediaSource.Factory(dataSourceFactory)
-                .createMediaSource(videoItem);
-        MediaSource audioSource = new ProgressiveMediaSource.Factory(dataSourceFactory)
-                .createMediaSource(audioItem);
-        playVideo(videoItem, new MergingMediaSource(videoSource, audioSource), sphereView);
+        playVideo(videoItem, createMergedMediaSource(videoItem, audioItem, dataSourceFactory), sphereView);
+    }
+
+    private MediaSource createMergedMediaSource(MediaItem videoItem,
+                                                MediaItem audioItem,
+                                                DefaultDataSource.Factory dataSourceFactory) {
+        ArrayList<MediaSource> sources = new ArrayList<MediaSource>();
+        sources.add(new ProgressiveMediaSource.Factory(dataSourceFactory)
+                .createMediaSource(videoItem));
+        if (audioItem != null) {
+            sources.add(new ProgressiveMediaSource.Factory(dataSourceFactory)
+                    .createMediaSource(audioItem));
+        }
+        addSubtitleMediaSources(sources, videoItem, dataSourceFactory);
+        if (sources.size() == 1) {
+            return sources.get(0);
+        }
+        return new MergingMediaSource(sources.toArray(new MediaSource[0]));
+    }
+
+    private void addSubtitleMediaSources(ArrayList<MediaSource> sources,
+                                         MediaItem mediaItem,
+                                         DefaultDataSource.Factory dataSourceFactory) {
+        if (mediaItem == null
+                || mediaItem.localConfiguration == null
+                || mediaItem.localConfiguration.subtitleConfigurations == null
+                || mediaItem.localConfiguration.subtitleConfigurations.isEmpty()) {
+            return;
+        }
+        SingleSampleMediaSource.Factory subtitleFactory =
+                new SingleSampleMediaSource.Factory(dataSourceFactory)
+                        .setTreatLoadErrorsAsEndOfStream(true);
+        for (MediaItem.SubtitleConfiguration subtitle
+                : mediaItem.localConfiguration.subtitleConfigurations) {
+            sources.add(subtitleFactory.createMediaSource(subtitle, C.TIME_UNSET));
+        }
+        AppLog.i(this, TAG, "Merged subtitle sources="
+                + mediaItem.localConfiguration.subtitleConfigurations.size());
     }
 
     private void playVideo(MediaItem mediaItem, MediaSource mediaSource, Boolean sphereView) {
@@ -967,14 +1001,10 @@ public class VideoActivity extends Activity {
         }
         AppLog.w(this, TAG, "Switching to smooth fallback stream: " + reason + " position=" + position);
         DefaultDataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(this);
-        MediaSource fallbackSource;
-        if (smoothFallbackAudioItem != null) {
-            fallbackSource = new MergingMediaSource(
-                    new ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(smoothFallbackVideoItem),
-                    new ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(smoothFallbackAudioItem));
-        } else {
-            fallbackSource = new ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(smoothFallbackVideoItem);
-        }
+        MediaSource fallbackSource = createMergedMediaSource(
+                smoothFallbackVideoItem,
+                smoothFallbackAudioItem,
+                dataSourceFactory);
         player.setMediaSource(fallbackSource);
         player.prepare();
         if (position > 0) {
