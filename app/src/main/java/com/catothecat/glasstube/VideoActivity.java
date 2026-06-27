@@ -86,8 +86,11 @@ public class VideoActivity extends Activity {
     private static final int GLASS_TARGET_VIDEO_WIDTH = 640;
     private static final int GLASS_TARGET_VIDEO_HEIGHT = 360;
     private static final int GLASS_TARGET_VIDEO_BITRATE = 1100000;
-    private static final long OVERLAY_TICK_INTERVAL_MS = 500;
+    private static final long OVERLAY_TICK_INTERVAL_MS = 1000;
     private static final long CONTROL_HIDE_DELAY_MS = 5000;
+    private static final long SMOOTH_FALLBACK_DELAY_MS = 7000;
+    private static final long SMOOTH_FALLBACK_HEAP_BYTES = 22L * 1024L * 1024L;
+    private static final int PLAYER_TARGET_BUFFER_BYTES = 4 * 1024 * 1024;
     String videoUrl = "";
     String videoTitle = "YouTube video";
     Boolean playlist;
@@ -109,6 +112,9 @@ public class VideoActivity extends Activity {
     private DefaultTrackSelector trackSelector;
     private boolean audioOverrideApplied = false;
     private boolean streamInfoLive = false;
+    private boolean usingSmoothFallback = false;
+    private MediaItem smoothFallbackVideoItem;
+    private MediaItem smoothFallbackAudioItem;
     private long lastPlayingStateSaveAtMs = 0;
     private long lastPeriodicStateSaveAtMs = 0;
     private long initialSeekMs = C.TIME_UNSET;
@@ -137,13 +143,45 @@ public class VideoActivity extends Activity {
                 return;
             }
             applyInitialSeekIfNeeded();
-            updateOverlayControls();
+            if (controlsVisible || overlaySeekBarDragging) {
+                updateOverlayControls();
+            }
+            maybeSwitchForHeapPressure();
             long now = SystemClock.elapsedRealtime();
             if (now - lastPeriodicStateSaveAtMs >= PLAYING_STATE_SAVE_INTERVAL_MS) {
                 lastPeriodicStateSaveAtMs = now;
                 savePlayerState(stateToString(player.getPlaybackState()));
             }
             stateHandler.postDelayed(this, OVERLAY_TICK_INTERVAL_MS);
+        }
+    };
+
+    private void maybeSwitchForHeapPressure() {
+        if (player == null
+                || usingSmoothFallback
+                || smoothFallbackVideoItem == null
+                || streamInfoLive
+                || player.getPlaybackState() != ExoPlayer.STATE_READY) {
+            return;
+        }
+        Runtime runtime = Runtime.getRuntime();
+        long usedHeap = runtime.totalMemory() - runtime.freeMemory();
+        if (usedHeap >= SMOOTH_FALLBACK_HEAP_BYTES) {
+            switchToSmoothFallback("heap pressure " + (usedHeap / 1024L / 1024L) + "MB");
+        }
+    }
+    private final Runnable smoothFallbackRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (player == null
+                    || usingSmoothFallback
+                    || smoothFallbackVideoItem == null
+                    || streamInfoLive) {
+                return;
+            }
+            if (player.getPlaybackState() == ExoPlayer.STATE_BUFFERING) {
+                switchToSmoothFallback("startup buffering");
+            }
         }
     };
     private final BroadcastReceiver remoteReceiver = new BroadcastReceiver() {
@@ -198,6 +236,9 @@ public class VideoActivity extends Activity {
         initialSeekApplied = initialSeekMs <= 0 || initialSeekMs == C.TIME_UNSET;
         videoUrl = normalizeYouTubeUrl(videoUrl);
         streamInfoLive = false;
+        usingSmoothFallback = false;
+        smoothFallbackVideoItem = null;
+        smoothFallbackAudioItem = null;
         AppLog.i(this, TAG, "Playing video=" + videoUrl
                 + (initialSeekApplied ? "" : " initialSeekMs=" + initialSeekMs));
         VideoStore.savePlaybackState(this, videoTitle, videoUrl, "loading", 0, 0);
@@ -275,12 +316,15 @@ public class VideoActivity extends Activity {
                 VideoStore.savePlaybackState(VideoActivity.this, videoTitle, videoUrl, "error", 0, 0);
                 playError();
                 finish();
+                task = null;
                 return;
             }
             String videoStreamUrl = null;
             String audioStreamUrl = null;
             boolean hlsStream = false;
             boolean mergedAudioVideo = false;
+            VideoStream smoothFallbackVideo = null;
+            AudioStream smoothFallbackAudio = null;
 
             try {
                 if (streamInfo.getName() != null && streamInfo.getName().length() > 0) {
@@ -304,9 +348,11 @@ public class VideoActivity extends Activity {
                 // Fall back to regular video streams if not live or HLS not available
                 if (videoStreamUrl == null) {
                     videoStreamUrl = chooseBestStream(streamInfo.getVideoStreams());
+                    smoothFallbackVideo = chooseSmoothVideoOnlyStream(streamInfo.getVideoOnlyStreams());
+                    smoothFallbackAudio = chooseBestAudioStream(streamInfo.getAudioStreams());
                     if (videoStreamUrl == null) {
                         VideoStream lowVideo = chooseBestVideoOnlyStream(streamInfo.getVideoOnlyStreams());
-                        AudioStream lowAudio = chooseBestAudioStream(streamInfo.getAudioStreams());
+                        AudioStream lowAudio = smoothFallbackAudio;
                         if (lowVideo != null && lowAudio != null) {
                             videoStreamUrl = lowVideo.getUrl();
                             audioStreamUrl = lowAudio.getUrl();
@@ -329,40 +375,69 @@ public class VideoActivity extends Activity {
                     finish();
                     return;
                 }
-                // Build the MediaItem with subtitles
-                MediaItem.Builder mediaItemBuilder = new MediaItem.Builder()
-                        .setUri(videoStreamUrl);
-                if (hlsStream) {
-                    mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8);
-                }
                 List<SubtitlesStream> subtitleStreams = streamInfo.getSubtitles();
-                if (subtitleStreams != null && !subtitleStreams.isEmpty()) {
-                    for (SubtitlesStream subtitle : subtitleStreams) {
-                        if (subtitle.getUrl() == null || subtitle.getUrl().length() == 0) {
-                            continue;
-                        }
-                        MediaItem.SubtitleConfiguration subtitleConfig = new MediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitle.getUrl()))
-                                .setLanguage(subtitle.getLanguageTag())
-                                .setMimeType(subtitle.getFormat().getMimeType())
-                                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                                .build();
-                        mediaItemBuilder.setSubtitleConfigurations(List.of(subtitleConfig));
-                        break; // For now, just add the first subtitle track
-                    }
+                MediaItem videoItem = buildMediaItem(videoStreamUrl, hlsStream, subtitleStreams);
+                if (!streamInfoLive && smoothFallbackVideo != null && smoothFallbackAudio != null) {
+                    smoothFallbackVideoItem = buildMediaItem(smoothFallbackVideo.getUrl(), false, subtitleStreams);
+                    smoothFallbackAudioItem = new MediaItem.Builder().setUri(smoothFallbackAudio.getUrl()).build();
+                    AppLog.i(VideoActivity.this, TAG, "Prepared smooth fallback video="
+                            + smoothFallbackVideo.getResolution()
+                            + " codec=" + smoothFallbackVideo.getCodec()
+                            + " bitrate=" + smoothFallbackVideo.getBitrate()
+                            + " audio=" + smoothFallbackAudio.getCodec()
+                            + " bitrate=" + smoothFallbackAudio.getAverageBitrate());
+                } else {
+                    smoothFallbackVideoItem = null;
+                    smoothFallbackAudioItem = null;
                 }
-                MediaItem videoItem = mediaItemBuilder.build();
+                boolean useSmoothAsPrimary = initialSeekMs > 0
+                        && initialSeekMs != C.TIME_UNSET
+                        && smoothFallbackVideoItem != null
+                        && smoothFallbackAudioItem != null;
+                if (useSmoothAsPrimary) {
+                    usingSmoothFallback = true;
+                    AppLog.w(VideoActivity.this, TAG, "Using smooth stream as primary for timestamp seek=" + initialSeekMs);
+                    playMergedVideo(smoothFallbackVideoItem, smoothFallbackAudioItem, false);
+                    task = null;
+                    return;
+                }
                 if (mergedAudioVideo) {
                     playMergedVideo(videoItem, new MediaItem.Builder().setUri(audioStreamUrl).build(), false);
                 } else {
                     playVideo(videoItem, false);
                 }
+                task = null;
             } catch (Exception e) {
                 AppLog.e(VideoActivity.this, TAG, "Error processing stream info", e);
                 VideoStore.savePlaybackState(VideoActivity.this, videoTitle, videoUrl, "error", 0, 0);
                 playError();
                 finish();
+                task = null;
             }
         }
+    }
+
+    private MediaItem buildMediaItem(String streamUrl, boolean hlsStream, List<SubtitlesStream> subtitleStreams) {
+        MediaItem.Builder mediaItemBuilder = new MediaItem.Builder()
+                .setUri(streamUrl);
+        if (hlsStream) {
+            mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8);
+        }
+        if (subtitleStreams != null && !subtitleStreams.isEmpty()) {
+            for (SubtitlesStream subtitle : subtitleStreams) {
+                if (subtitle == null || subtitle.getUrl() == null || subtitle.getUrl().length() == 0) {
+                    continue;
+                }
+                MediaItem.SubtitleConfiguration subtitleConfig = new MediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitle.getUrl()))
+                        .setLanguage(subtitle.getLanguageTag())
+                        .setMimeType(subtitle.getFormat().getMimeType())
+                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                        .build();
+                mediaItemBuilder.setSubtitleConfigurations(List.of(subtitleConfig));
+                break;
+            }
+        }
+        return mediaItemBuilder.build();
     }
 
     private String chooseBestStream(List<VideoStream> videoStreams) {
@@ -436,6 +511,44 @@ public class VideoActivity extends Activity {
             }
             if (fps > 30) {
                 score += 5000000;
+            }
+            if (score < bestScore) {
+                bestScore = score;
+                best = stream;
+            }
+        }
+        return best;
+    }
+
+    private VideoStream chooseSmoothVideoOnlyStream(List<VideoStream> videoStreams) {
+        if (videoStreams == null || videoStreams.isEmpty()) {
+            return null;
+        }
+        VideoStream best = null;
+        int bestScore = Integer.MAX_VALUE;
+        for (VideoStream stream : videoStreams) {
+            if (stream == null || stream.getUrl() == null || stream.getUrl().length() == 0) {
+                continue;
+            }
+            String codec = stream.getCodec() == null ? "" : stream.getCodec().toLowerCase(Locale.ROOT);
+            if (codec.length() > 0 && !codec.contains("avc1")) {
+                continue;
+            }
+            int height = stream.getHeight() > 0 ? stream.getHeight() : parseHeight(stream.getResolution());
+            if (height <= 0 || height > GLASS_TARGET_VIDEO_HEIGHT) {
+                continue;
+            }
+            int bitrate = stream.getBitrate() <= 0 ? 800000 : stream.getBitrate();
+            int fps = stream.getFps();
+            int score = bitrate + Math.abs(height - 240) * 2000;
+            if (height > 240) {
+                score += 1000000;
+            }
+            if (height < 144) {
+                score += 500000;
+            }
+            if (fps > 30) {
+                score += 3000000;
             }
             if (score < bestScore) {
                 bestScore = score;
@@ -647,10 +760,11 @@ public class VideoActivity extends Activity {
 
         LoadControl loadControl = new DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                        12000,
-                        45000,
-                        2000,
-                        7000)
+                        5000,
+                        14000,
+                        1500,
+                        2500)
+                .setTargetBufferBytes(PLAYER_TARGET_BUFFER_BYTES)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build();
 
@@ -658,7 +772,7 @@ public class VideoActivity extends Activity {
         trackSelector.setParameters(
                 trackSelector.buildUponParameters()
                         .setMaxVideoSize(GLASS_TARGET_VIDEO_WIDTH, GLASS_TARGET_VIDEO_HEIGHT)
-                        .setMinVideoSize(GLASS_TARGET_VIDEO_WIDTH, GLASS_TARGET_VIDEO_HEIGHT)
+                        .setMinVideoSize(0, 0)
                         .setMaxVideoBitrate(GLASS_TARGET_VIDEO_BITRATE)
                         .setMaxAudioChannelCount(2)
                         .setPreferredAudioLanguage("en")
@@ -683,6 +797,15 @@ public class VideoActivity extends Activity {
         player.addListener(new Player.Listener() {
             @Override
             public void onPlaybackStateChanged(int state) {
+                if (state == ExoPlayer.STATE_BUFFERING
+                        && !usingSmoothFallback
+                        && smoothFallbackVideoItem != null
+                        && !streamInfoLive) {
+                    stateHandler.removeCallbacks(smoothFallbackRunnable);
+                    stateHandler.postDelayed(smoothFallbackRunnable, SMOOTH_FALLBACK_DELAY_MS);
+                } else if (state == ExoPlayer.STATE_READY || state == ExoPlayer.STATE_ENDED) {
+                    stateHandler.removeCallbacks(smoothFallbackRunnable);
+                }
                 if (state == ExoPlayer.STATE_READY || state == ExoPlayer.STATE_ENDED) {
                     hideBufferingIndicator();
                 }
@@ -756,6 +879,35 @@ public class VideoActivity extends Activity {
                 hideBufferingIndicator();
             }
         }, 8000);
+    }
+
+    private void switchToSmoothFallback(String reason) {
+        if (player == null || smoothFallbackVideoItem == null || usingSmoothFallback) {
+            return;
+        }
+        usingSmoothFallback = true;
+        long position = player.getCurrentPosition();
+        if (position <= 0 && initialSeekMs > 0 && initialSeekMs != C.TIME_UNSET) {
+            position = initialSeekMs;
+        }
+        AppLog.w(this, TAG, "Switching to smooth fallback stream: " + reason + " position=" + position);
+        DefaultDataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(this);
+        MediaSource fallbackSource;
+        if (smoothFallbackAudioItem != null) {
+            fallbackSource = new MergingMediaSource(
+                    new ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(smoothFallbackVideoItem),
+                    new ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(smoothFallbackAudioItem));
+        } else {
+            fallbackSource = new ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(smoothFallbackVideoItem);
+        }
+        player.setMediaSource(fallbackSource);
+        player.prepare();
+        if (position > 0) {
+            player.seekTo(position);
+        }
+        player.play();
+        showControlsTemporarily();
+        savePlayerState("buffering");
     }
 
     private void hideBufferingIndicator() {
@@ -920,6 +1072,7 @@ public class VideoActivity extends Activity {
             playerView.removeCallbacks(doubleTapRunnable);
         }
         stateHandler.removeCallbacks(stateTicker);
+        stateHandler.removeCallbacks(smoothFallbackRunnable);
         if (task != null) {
             task.cancel(true);
             task = null;
@@ -1329,7 +1482,7 @@ public class VideoActivity extends Activity {
                     }
                     long target = (duration * progress) / seekBar.getMax();
                     if (positionText != null) {
-                        positionText.setText(formatDuration(target));
+                        setTextIfChanged(positionText, formatDuration(target));
                     }
                 }
 
@@ -1360,13 +1513,13 @@ public class VideoActivity extends Activity {
     private void updateOverlayControls() {
         if (player == null) {
             if (positionText != null) {
-                positionText.setText("0:00");
+                setTextIfChanged(positionText, "0:00");
             }
             if (durationText != null) {
-                durationText.setText("--:--");
+                setTextIfChanged(durationText, "--:--");
             }
             if (timeLabel != null) {
-                timeLabel.setText("0:00 / --:--");
+                setTextIfChanged(timeLabel, "0:00 / --:--");
             }
             if (progressSeekBar != null) {
                 progressSeekBar.setEnabled(false);
@@ -1397,16 +1550,16 @@ public class VideoActivity extends Activity {
                 && duration > 0
                 && duration != C.TIME_UNSET;
         if (positionText != null) {
-            positionText.setText(liveStream ? "LIVE" : formatDuration(position));
+            setTextIfChanged(positionText, liveStream ? "LIVE" : formatDuration(position));
         }
         if (durationText != null) {
-            durationText.setText(seekable ? formatDuration(duration) : "LIVE");
+            setTextIfChanged(durationText, seekable ? formatDuration(duration) : "LIVE");
         }
         if (timeLabel != null) {
             if (liveStream) {
-                timeLabel.setText("LIVE");
+                setTextIfChanged(timeLabel, "LIVE");
             } else {
-                timeLabel.setText(formatDuration(position) + " / " + formatDuration(duration));
+                setTextIfChanged(timeLabel, formatDuration(position) + " / " + formatDuration(duration));
             }
         }
         if (progressSeekBar != null) {
@@ -1414,8 +1567,20 @@ public class VideoActivity extends Activity {
             progressSeekBar.setAlpha(seekable ? 1f : 0.35f);
             if (!overlaySeekBarDragging) {
                 int progress = seekable ? (int) clamp((position * progressSeekBar.getMax()) / duration, 0, progressSeekBar.getMax()) : 0;
-                progressSeekBar.setProgress(progress);
+                if (progressSeekBar.getProgress() != progress) {
+                    progressSeekBar.setProgress(progress);
+                }
             }
+        }
+    }
+
+    private void setTextIfChanged(TextView view, String value) {
+        if (view == null || value == null) {
+            return;
+        }
+        CharSequence current = view.getText();
+        if (current == null || !value.contentEquals(current)) {
+            view.setText(value);
         }
     }
 
@@ -1436,9 +1601,13 @@ public class VideoActivity extends Activity {
         long minutes = (totalSeconds / 60) % 60;
         long hours = totalSeconds / 3600;
         if (hours > 0) {
-            return String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds);
+            return hours + ":" + twoDigits(minutes) + ":" + twoDigits(seconds);
         }
-        return String.format(Locale.US, "%d:%02d", minutes, seconds);
+        return minutes + ":" + twoDigits(seconds);
+    }
+
+    private String twoDigits(long value) {
+        return value < 10 ? "0" + value : Long.toString(value);
     }
 
     private List<String> extractorCandidates(String rawUrl) {
