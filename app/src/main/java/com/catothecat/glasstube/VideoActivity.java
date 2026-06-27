@@ -647,10 +647,10 @@ public class VideoActivity extends Activity {
 
         LoadControl loadControl = new DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                        6000,
-                        18000,
+                        12000,
+                        45000,
                         2000,
-                        4000)
+                        7000)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build();
 
