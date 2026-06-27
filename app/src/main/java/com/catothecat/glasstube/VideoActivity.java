@@ -16,6 +16,7 @@ import android.os.SystemClock;
 import android.text.Html;
 import android.util.Log;
 import android.util.TypedValue;
+import android.util.Xml;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -64,6 +65,9 @@ import org.schabi.newpipe.extractor.stream.SubtitlesStream;
 import org.schabi.newpipe.extractor.stream.VideoStream;
 
 import java.io.IOException;
+import java.io.BufferedReader;
+import java.io.Reader;
+import java.io.StringReader;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
@@ -74,6 +78,8 @@ import com.google.android.exoplayer2.source.TrackGroupArray;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
+
+import org.xmlpull.v1.XmlPullParser;
 
 public class VideoActivity extends Activity {
     private ExoPlayer player;
@@ -92,13 +98,17 @@ public class VideoActivity extends Activity {
     private static final int GLASS_TARGET_VIDEO_HEIGHT = 360;
     private static final int GLASS_TARGET_VIDEO_BITRATE = 1100000;
     private static final long OVERLAY_TICK_INTERVAL_MS = 1000;
+    private static final long CAPTION_TICK_INTERVAL_MS = 250;
+    private static final long CAPTION_PREFETCH_DELAY_MS = 1000;
     private static final long CONTROL_HIDE_DELAY_MS = 5000;
     private static final long SMOOTH_FALLBACK_DELAY_MS = 7000;
     private static final long SMOOTH_FALLBACK_HEAP_BYTES = 22L * 1024L * 1024L;
     private static final int PLAYER_TARGET_BUFFER_BYTES = 8 * 1024 * 1024;
     private static final int SMOOTH_PLAYER_TARGET_BUFFER_BYTES = 10 * 1024 * 1024;
     private static final long UNINTENDED_PAUSE_RESUME_COOLDOWN_MS = 2500;
-    private static final int MAX_CAPTION_CUES = 3000;
+    private static final int MAX_CAPTION_CUES = 800;
+    private static final long CAPTION_WINDOW_BEFORE_MS = 60000;
+    private static final long CAPTION_WINDOW_AFTER_MS = 20L * 60000L;
     String videoUrl = "";
     String videoTitle = "YouTube video";
     Boolean playlist;
@@ -136,6 +146,8 @@ public class VideoActivity extends Activity {
     private boolean captionLoadAttempted = false;
     private boolean captionLoading = false;
     private String displayedCaptionText = "";
+    private long captionWindowStartMs = 0;
+    private long captionWindowEndMs = 0;
     private final Handler stateHandler = new Handler();
     private final Runnable singleTapRunnable = new Runnable() {
         @Override
@@ -169,7 +181,17 @@ public class VideoActivity extends Activity {
                 lastPeriodicStateSaveAtMs = now;
                 savePlayerState(stateToString(player.getPlaybackState()));
             }
-            stateHandler.postDelayed(this, OVERLAY_TICK_INTERVAL_MS);
+            stateHandler.postDelayed(this,
+                    subtitlesEnabled ? CAPTION_TICK_INTERVAL_MS : OVERLAY_TICK_INTERVAL_MS);
+        }
+    };
+
+    private final Runnable captionPrefetchRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (player != null && selectedSubtitleStream != null && !captionLoadAttempted) {
+                startCaptionLoadIfNeeded(false);
+            }
         }
     };
 
@@ -264,6 +286,8 @@ public class VideoActivity extends Activity {
         captionLoadAttempted = false;
         captionLoading = false;
         displayedCaptionText = "";
+        captionWindowStartMs = 0;
+        captionWindowEndMs = 0;
         AppLog.i(this, TAG, "Playing video=" + videoUrl
                 + (initialSeekApplied ? "" : " initialSeekMs=" + initialSeekMs));
         VideoStore.savePlaybackState(this, videoTitle, videoUrl, "loading", 0, 0);
@@ -578,31 +602,52 @@ public class VideoActivity extends Activity {
         }
     }
 
-    private void startCaptionLoadIfNeeded() {
+    private void startCaptionLoadIfNeeded(boolean showLoading) {
         if (selectedSubtitleStream == null || captionLoadAttempted || captionLoading) {
             return;
         }
         captionLoadAttempted = true;
         captionLoading = true;
-        captionTask = new LoadCaptionsTask().execute();
-        setCaptionOverlayText("Loading captions...");
+        long positionMs = captionLoadAnchorPositionMs();
+        captionTask = new LoadCaptionsTask(positionMs).execute();
+        if (showLoading) {
+            setCaptionOverlayText("Loading captions...");
+        }
+    }
+
+    private long captionLoadAnchorPositionMs() {
+        long positionMs = player == null ? 0 : player.getCurrentPosition();
+        if (positionMs <= 0 && initialSeekMs > 0 && initialSeekMs != C.TIME_UNSET) {
+            return initialSeekMs;
+        }
+        return Math.max(0, positionMs);
     }
 
     private class LoadCaptionsTask extends AsyncTask<Void, Void, List<CaptionCue>> {
         private Exception error;
+        private long windowStartMs;
+        private long windowEndMs;
+        private final long basePositionMs;
+
+        LoadCaptionsTask(long basePositionMs) {
+            this.basePositionMs = basePositionMs;
+        }
 
         @Override
         protected List<CaptionCue> doInBackground(Void... voids) {
             try {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND
                         + Process.THREAD_PRIORITY_LESS_FAVORABLE);
+                windowStartMs = Math.max(0, basePositionMs - CAPTION_WINDOW_BEFORE_MS);
+                windowEndMs = basePositionMs + CAPTION_WINDOW_AFTER_MS;
                 String url = selectedSubtitleStream.getUrl();
                 String mimeType = selectedSubtitleStream.getFormat() == null
                         ? MimeTypes.TEXT_VTT
                         : selectedSubtitleStream.getFormat().getMimeType();
-                if (isYouTubeTimedTextUrl(url)
-                        || MimeTypes.APPLICATION_TTML.equals(mimeType)
-                        || MimeTypes.TEXT_VTT.equals(mimeType)) {
+                if (isYouTubeTimedTextUrl(url) || MimeTypes.APPLICATION_TTML.equals(mimeType)) {
+                    return fetchXmlCaptions(url, windowStartMs, windowEndMs);
+                }
+                if (MimeTypes.TEXT_VTT.equals(mimeType)) {
                     url = preferWebVttSubtitleUrl(url);
                 }
                 Request request = new Request.Builder().url(url).build();
@@ -632,8 +677,112 @@ public class VideoActivity extends Activity {
                 return;
             }
             captionCues = new ArrayList<CaptionCue>(cues);
-            AppLog.i(VideoActivity.this, TAG, "Caption overlay loaded cues=" + captionCues.size());
+            captionWindowStartMs = windowStartMs;
+            captionWindowEndMs = windowEndMs;
+            AppLog.i(VideoActivity.this, TAG, "Caption overlay loaded cues=" + captionCues.size()
+                    + " window=" + captionWindowStartMs + "-" + captionWindowEndMs);
             updateCaptionOverlay();
+        }
+    }
+
+    private List<CaptionCue> fetchXmlCaptions(String url,
+                                              long windowStartMs,
+                                              long windowEndMs) throws Exception {
+        Request request = new Request.Builder().url(url).build();
+        Response response = HLS_CLIENT.newCall(request).execute();
+        try {
+            if (!response.isSuccessful() || response.body() == null) {
+                throw new IOException("Caption XML request failed: HTTP " + response.code());
+            }
+            return parseXmlCaptions(response.body().charStream(), windowStartMs, windowEndMs);
+        } finally {
+            response.close();
+        }
+    }
+
+    private List<CaptionCue> parseXmlCaptions(Reader reader,
+                                              long windowStartMs,
+                                              long windowEndMs) throws Exception {
+        ArrayList<CaptionCue> cues = new ArrayList<CaptionCue>();
+        XmlPullParser parser = Xml.newPullParser();
+        parser.setInput(reader);
+        String activeTag = null;
+        long startMs = -1;
+        long endMs = -1;
+        StringBuilder text = new StringBuilder();
+        int eventType = parser.getEventType();
+        while (eventType != XmlPullParser.END_DOCUMENT && cues.size() < MAX_CAPTION_CUES) {
+            if (eventType == XmlPullParser.START_TAG) {
+                String name = parser.getName();
+                if ("text".equals(name) || "p".equals(name)) {
+                    activeTag = name;
+                    startMs = parseXmlCaptionStartMs(parser);
+                    long durationMs = parseXmlCaptionDurationMs(parser);
+                    long explicitEndMs = parseXmlCaptionEndMs(parser);
+                    endMs = explicitEndMs >= 0 ? explicitEndMs
+                            : durationMs > 0 && startMs >= 0 ? startMs + durationMs : -1;
+                    text.setLength(0);
+                }
+            } else if (eventType == XmlPullParser.TEXT) {
+                if (activeTag != null) {
+                    text.append(parser.getText());
+                }
+            } else if (eventType == XmlPullParser.END_TAG) {
+                if (activeTag != null && activeTag.equals(parser.getName())) {
+                    if (endMs >= windowStartMs && startMs <= windowEndMs) {
+                        addCaptionCue(cues, startMs, endMs, text.toString());
+                    } else if (startMs > windowEndMs && !cues.isEmpty()) {
+                        break;
+                    }
+                    activeTag = null;
+                    startMs = -1;
+                    endMs = -1;
+                    text.setLength(0);
+                }
+            }
+            eventType = parser.next();
+        }
+        return cues;
+    }
+
+    private long parseXmlCaptionStartMs(XmlPullParser parser) {
+        String attrName = attributeNamePresent(parser, "start", "t", "begin");
+        return parseCaptionTimeAttribute(parser.getAttributeValue(null, attrName),
+                !"t".equals(attrName));
+    }
+
+    private long parseXmlCaptionDurationMs(XmlPullParser parser) {
+        String attrName = attributeNamePresent(parser, "dur", "d");
+        return parseCaptionTimeAttribute(parser.getAttributeValue(null, attrName),
+                !"d".equals(attrName));
+    }
+
+    private long parseXmlCaptionEndMs(XmlPullParser parser) {
+        return parseCaptionTimeAttribute(parser.getAttributeValue(null, "end"), true);
+    }
+
+    private String attributeNamePresent(XmlPullParser parser, String... names) {
+        for (String name : names) {
+            String value = parser.getAttributeValue(null, name);
+            if (value != null && value.length() > 0) {
+                return name;
+            }
+        }
+        return "";
+    }
+
+    private long parseCaptionTimeAttribute(String raw, boolean secondsValue) {
+        if (raw == null || raw.length() == 0) {
+            return -1;
+        }
+        try {
+            if (raw.indexOf(':') >= 0) {
+                return parseVttTimeMs(raw);
+            }
+            double value = Double.parseDouble(raw);
+            return Math.round(value * (secondsValue ? 1000D : 1D));
+        } catch (NumberFormatException e) {
+            return -1;
         }
     }
 
@@ -642,57 +791,68 @@ public class VideoActivity extends Activity {
         if (body == null || body.length() == 0) {
             return cues;
         }
-        String normalized = body.replace("\r\n", "\n").replace('\r', '\n');
-        String[] blocks = normalized.split("\n\n+");
-        for (String block : blocks) {
-            if (cues.size() >= MAX_CAPTION_CUES || block == null) {
-                break;
-            }
-            String trimmed = block.trim();
-            if (trimmed.length() == 0
-                    || trimmed.startsWith("WEBVTT")
-                    || trimmed.startsWith("NOTE")
-                    || trimmed.startsWith("STYLE")
-                    || trimmed.startsWith("REGION")) {
-                continue;
-            }
-            String[] lines = trimmed.split("\n");
-            int timingLine = -1;
-            for (int i = 0; i < lines.length; i++) {
-                if (lines[i].contains("-->")) {
-                    timingLine = i;
-                    break;
-                }
-            }
-            if (timingLine < 0) {
-                continue;
-            }
-            String[] times = lines[timingLine].split("-->");
-            if (times.length < 2) {
-                continue;
-            }
-            long startMs = parseVttTimeMs(times[0]);
-            long endMs = parseVttTimeMs(times[1]);
-            if (startMs < 0 || endMs <= startMs) {
-                continue;
-            }
+        try {
+            BufferedReader reader = new BufferedReader(new StringReader(
+                    body.replace("\r\n", "\n").replace('\r', '\n')));
+            String line;
+            long startMs = -1;
+            long endMs = -1;
             StringBuilder text = new StringBuilder();
-            for (int i = timingLine + 1; i < lines.length; i++) {
-                String line = lines[i].trim();
-                if (line.length() == 0) {
+            while ((line = reader.readLine()) != null && cues.size() < MAX_CAPTION_CUES) {
+                String trimmed = line.trim();
+                if (trimmed.length() == 0) {
+                    addPendingVttCue(cues, startMs, endMs, text);
+                    startMs = -1;
+                    endMs = -1;
+                    text.setLength(0);
                     continue;
                 }
-                if (text.length() > 0) {
-                    text.append('\n');
+                if (trimmed.startsWith("WEBVTT")
+                        || trimmed.startsWith("NOTE")
+                        || trimmed.startsWith("STYLE")
+                        || trimmed.startsWith("REGION")) {
+                    continue;
                 }
-                text.append(line);
+                if (trimmed.contains("-->")) {
+                    String[] times = trimmed.split("-->");
+                    if (times.length >= 2) {
+                        startMs = parseVttTimeMs(times[0]);
+                        endMs = parseVttTimeMs(times[1]);
+                    }
+                    continue;
+                }
+                if (startMs >= 0) {
+                    if (text.length() > 0) {
+                        text.append('\n');
+                    }
+                    text.append(trimmed);
+                }
             }
-            String cleanText = cleanCaptionText(text.toString());
-            if (cleanText.length() > 0) {
-                cues.add(new CaptionCue(startMs, endMs, cleanText));
-            }
+            addPendingVttCue(cues, startMs, endMs, text);
+        } catch (IOException ignored) {
         }
         return cues;
+    }
+
+    private void addPendingVttCue(ArrayList<CaptionCue> cues,
+                                  long startMs,
+                                  long endMs,
+                                  StringBuilder text) {
+        addCaptionCue(cues, startMs, endMs, text == null ? "" : text.toString());
+    }
+
+    private void addCaptionCue(ArrayList<CaptionCue> cues,
+                               long startMs,
+                               long endMs,
+                               String text) {
+        if (cues.size() >= MAX_CAPTION_CUES || startMs < 0 || endMs <= startMs
+                || text == null || text.length() == 0) {
+            return;
+        }
+        String cleanText = cleanCaptionText(text);
+        if (cleanText.length() > 0) {
+            cues.add(new CaptionCue(startMs, endMs, cleanText));
+        }
     }
 
     private long parseVttTimeMs(String rawTime) {
@@ -854,11 +1014,11 @@ public class VideoActivity extends Activity {
             }
             int bitrate = stream.getBitrate() <= 0 ? 800000 : stream.getBitrate();
             int fps = stream.getFps();
-            int score = bitrate + Math.abs(height - 240) * 2000;
-            if (height > 240) {
-                score += 1000000;
+            int score = bitrate + Math.abs(height - GLASS_TARGET_VIDEO_HEIGHT) * 2000;
+            if (height < GLASS_TARGET_VIDEO_HEIGHT) {
+                score += 500000;
             }
-            if (height < 144) {
+            if (height < 240) {
                 score += 500000;
             }
             if (fps > 30) {
@@ -1176,7 +1336,12 @@ public class VideoActivity extends Activity {
                 }
                 if (state == ExoPlayer.STATE_READY) {
                     applyInitialSeekIfNeeded();
+                    if (selectedSubtitleStream != null && !captionLoadAttempted) {
+                        stateHandler.removeCallbacks(captionPrefetchRunnable);
+                        stateHandler.postDelayed(captionPrefetchRunnable, CAPTION_PREFETCH_DELAY_MS);
+                    }
                 }
+                updateCaptionOverlay();
                 updateOverlayControls();
                 if (state == ExoPlayer.STATE_ENDED && playlist) {
                     setResult(RESULT_OK);
@@ -1195,6 +1360,14 @@ public class VideoActivity extends Activity {
             }
 
             @Override
+            public void onPositionDiscontinuity(Player.PositionInfo oldPosition,
+                                                Player.PositionInfo newPosition,
+                                                int reason) {
+                updateCaptionOverlay();
+                updateOverlayControls();
+            }
+
+            @Override
             public void onIsPlayingChanged(boolean isPlaying) {
                 AppLog.d(VideoActivity.this, TAG, "isPlaying=" + isPlaying
                         + " state=" + playbackStateName(player.getPlaybackState())
@@ -1204,6 +1377,7 @@ public class VideoActivity extends Activity {
                 if (isPlaying) {
                     hideBufferingIndicator();
                 }
+                updateCaptionOverlay();
                 updateOverlayControls();
                 savePlayerState(stateToString(player.getPlaybackState()));
             }
@@ -1216,6 +1390,7 @@ public class VideoActivity extends Activity {
                         + " state=" + playbackStateName(player.getPlaybackState())
                         + " position=" + player.getCurrentPosition());
                 maybeResumeUnexpectedPause(playWhenReady, reason);
+                updateCaptionOverlay();
                 updateOverlayControls();
                 savePlayerState(stateToString(player.getPlaybackState()));
             }
@@ -1259,6 +1434,10 @@ public class VideoActivity extends Activity {
         playerView.onResume();
         stateHandler.removeCallbacks(stateTicker);
         stateHandler.post(stateTicker);
+        if (selectedSubtitleStream != null && !captionLoadAttempted) {
+            stateHandler.removeCallbacks(captionPrefetchRunnable);
+            stateHandler.postDelayed(captionPrefetchRunnable, CAPTION_PREFETCH_DELAY_MS);
+        }
         stateHandler.postDelayed(new Runnable() {
             @Override
             public void run() {
@@ -1456,6 +1635,7 @@ public class VideoActivity extends Activity {
         }
         stateHandler.removeCallbacks(stateTicker);
         stateHandler.removeCallbacks(smoothFallbackRunnable);
+        stateHandler.removeCallbacks(captionPrefetchRunnable);
         if (task != null) {
             task.cancel(true);
             task = null;
@@ -1762,7 +1942,7 @@ public class VideoActivity extends Activity {
         glassCaptionOverlay.setVisibility(subtitlesEnabled ? View.VISIBLE : View.GONE);
         applyCaptionTrackSelection();
         if (subtitlesEnabled) {
-            startCaptionLoadIfNeeded();
+            startCaptionLoadIfNeeded(true);
             updateCaptionOverlay();
         } else {
             setCaptionOverlayText("");
@@ -1790,6 +1970,14 @@ public class VideoActivity extends Activity {
             return;
         }
         long position = player == null ? 0 : player.getCurrentPosition();
+        if (!captionLoading
+                && selectedSubtitleStream != null
+                && (position < captionWindowStartMs || position > captionWindowEndMs)) {
+            captionLoadAttempted = false;
+            captionCues.clear();
+            startCaptionLoadIfNeeded(subtitlesEnabled);
+            return;
+        }
         CaptionCue active = findCaptionCue(position);
         setCaptionOverlayText(active == null ? "" : active.text);
     }
@@ -2039,6 +2227,15 @@ public class VideoActivity extends Activity {
         positionText = findViewById(R.id.exo_position);
         progressSeekBar = findViewById(R.id.glass_progress);
         durationText = findViewById(R.id.exo_duration);
+        if (captionIcon != null) {
+            captionIcon.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    toggleCaptions();
+                    showControlsTemporarily();
+                }
+            });
+        }
         if (playPauseButton != null) {
             playPauseButton.setOnClickListener(new View.OnClickListener() {
                 @Override
