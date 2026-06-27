@@ -91,6 +91,8 @@ public class VideoActivity extends Activity {
     private static final long SMOOTH_FALLBACK_DELAY_MS = 7000;
     private static final long SMOOTH_FALLBACK_HEAP_BYTES = 22L * 1024L * 1024L;
     private static final int PLAYER_TARGET_BUFFER_BYTES = 4 * 1024 * 1024;
+    private static final int SMOOTH_PLAYER_TARGET_BUFFER_BYTES = 6 * 1024 * 1024;
+    private static final long UNINTENDED_PAUSE_RESUME_COOLDOWN_MS = 2500;
     String videoUrl = "";
     String videoTitle = "YouTube video";
     Boolean playlist;
@@ -115,6 +117,8 @@ public class VideoActivity extends Activity {
     private boolean usingSmoothFallback = false;
     private MediaItem smoothFallbackVideoItem;
     private MediaItem smoothFallbackAudioItem;
+    private boolean userPausedPlayback = false;
+    private long lastUnexpectedResumeAtMs = 0;
     private long lastPlayingStateSaveAtMs = 0;
     private long lastPeriodicStateSaveAtMs = 0;
     private long initialSeekMs = C.TIME_UNSET;
@@ -239,6 +243,8 @@ public class VideoActivity extends Activity {
         usingSmoothFallback = false;
         smoothFallbackVideoItem = null;
         smoothFallbackAudioItem = null;
+        userPausedPlayback = false;
+        lastUnexpectedResumeAtMs = 0;
         AppLog.i(this, TAG, "Playing video=" + videoUrl
                 + (initialSeekApplied ? "" : " initialSeekMs=" + initialSeekMs));
         VideoStore.savePlaybackState(this, videoTitle, videoUrl, "loading", 0, 0);
@@ -758,15 +764,29 @@ public class VideoActivity extends Activity {
         }
         bindOverlayControls();
 
+        int minBufferMs = usingSmoothFallback ? 12000 : 5000;
+        int maxBufferMs = usingSmoothFallback ? 45000 : 14000;
+        int playbackBufferMs = usingSmoothFallback ? 2500 : 1500;
+        int rebufferMs = usingSmoothFallback ? 6500 : 2500;
+        int targetBufferBytes = usingSmoothFallback
+                ? SMOOTH_PLAYER_TARGET_BUFFER_BYTES
+                : PLAYER_TARGET_BUFFER_BYTES;
+
         LoadControl loadControl = new DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                        5000,
-                        14000,
-                        1500,
-                        2500)
-                .setTargetBufferBytes(PLAYER_TARGET_BUFFER_BYTES)
+                        minBufferMs,
+                        maxBufferMs,
+                        playbackBufferMs,
+                        rebufferMs)
+                .setTargetBufferBytes(targetBufferBytes)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build();
+        AppLog.i(this, TAG, "Player buffer min=" + minBufferMs
+                + " max=" + maxBufferMs
+                + " playback=" + playbackBufferMs
+                + " rebuffer=" + rebufferMs
+                + " targetBytes=" + targetBufferBytes
+                + " smooth=" + usingSmoothFallback);
 
         trackSelector = new DefaultTrackSelector(this);
         trackSelector.setParameters(
@@ -792,11 +812,15 @@ public class VideoActivity extends Activity {
                 // Limit video resolution to match Glass display
                 .setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
                 .build();
-        player.setAudioAttributes(audioAttributes, true);
+        player.setAudioAttributes(audioAttributes, false);
         player.setVolume(1.0f);
         player.addListener(new Player.Listener() {
             @Override
             public void onPlaybackStateChanged(int state) {
+                AppLog.d(VideoActivity.this, TAG, "Playback state=" + playbackStateName(state)
+                        + " playWhenReady=" + player.getPlayWhenReady()
+                        + " isPlaying=" + player.isPlaying()
+                        + " position=" + player.getCurrentPosition());
                 if (state == ExoPlayer.STATE_BUFFERING
                         && !usingSmoothFallback
                         && smoothFallbackVideoItem != null
@@ -831,6 +855,11 @@ public class VideoActivity extends Activity {
 
             @Override
             public void onIsPlayingChanged(boolean isPlaying) {
+                AppLog.d(VideoActivity.this, TAG, "isPlaying=" + isPlaying
+                        + " state=" + playbackStateName(player.getPlaybackState())
+                        + " playWhenReady=" + player.getPlayWhenReady()
+                        + " userPaused=" + userPausedPlayback
+                        + " position=" + player.getCurrentPosition());
                 if (isPlaying) {
                     hideBufferingIndicator();
                 }
@@ -840,8 +869,21 @@ public class VideoActivity extends Activity {
 
             @Override
             public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
+                AppLog.i(VideoActivity.this, TAG, "playWhenReady=" + playWhenReady
+                        + " reason=" + playWhenReadyReasonName(reason)
+                        + " userPaused=" + userPausedPlayback
+                        + " state=" + playbackStateName(player.getPlaybackState())
+                        + " position=" + player.getCurrentPosition());
+                maybeResumeUnexpectedPause(playWhenReady, reason);
                 updateOverlayControls();
                 savePlayerState(stateToString(player.getPlaybackState()));
+            }
+
+            @Override
+            public void onIsLoadingChanged(boolean isLoading) {
+                AppLog.d(VideoActivity.this, TAG, "isLoading=" + isLoading
+                        + " state=" + playbackStateName(player.getPlaybackState())
+                        + " position=" + player.getCurrentPosition());
             }
 
             @Override
@@ -905,6 +947,7 @@ public class VideoActivity extends Activity {
         if (position > 0) {
             player.seekTo(position);
         }
+        userPausedPlayback = false;
         player.play();
         showControlsTemporarily();
         savePlayerState("buffering");
@@ -1165,13 +1208,54 @@ public class VideoActivity extends Activity {
             return;
         }
         if (player.getPlayWhenReady()) {
-            player.pause();
+            pausePlayback("tap");
         } else {
-            seekToLiveEdgeIfNeeded();
-            player.play();
+            startPlayback("tap");
         }
         updateOverlayControls();
         showControlsTemporarily();
+    }
+
+    private void startPlayback(String source) {
+        if (player == null) {
+            return;
+        }
+        userPausedPlayback = false;
+        seekToLiveEdgeIfNeeded();
+        AppLog.i(this, TAG, "Playback start requested source=" + source
+                + " state=" + playbackStateName(player.getPlaybackState())
+                + " position=" + player.getCurrentPosition());
+        player.play();
+    }
+
+    private void pausePlayback(String source) {
+        if (player == null) {
+            return;
+        }
+        userPausedPlayback = true;
+        AppLog.i(this, TAG, "Playback pause requested source=" + source
+                + " state=" + playbackStateName(player.getPlaybackState())
+                + " position=" + player.getCurrentPosition());
+        player.pause();
+    }
+
+    private void maybeResumeUnexpectedPause(boolean playWhenReady, int reason) {
+        if (player == null
+                || playWhenReady
+                || userPausedPlayback
+                || player.getPlaybackState() == ExoPlayer.STATE_ENDED
+                || player.getPlaybackState() == ExoPlayer.STATE_IDLE) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastUnexpectedResumeAtMs < UNINTENDED_PAUSE_RESUME_COOLDOWN_MS) {
+            return;
+        }
+        lastUnexpectedResumeAtMs = now;
+        AppLog.w(this, TAG, "Resuming unexpected pause reason=" + playWhenReadyReasonName(reason)
+                + " state=" + playbackStateName(player.getPlaybackState())
+                + " position=" + player.getCurrentPosition());
+        player.play();
     }
 
     private void showVolumeMode() {
@@ -1199,14 +1283,13 @@ public class VideoActivity extends Activity {
         }
         if ("play_pause".equals(command) || "play".equals(command) || "pause".equals(command)) {
             if ("play".equals(command) || (!"pause".equals(command) && !player.getPlayWhenReady())) {
-                seekToLiveEdgeIfNeeded();
-                player.play();
+                startPlayback("remote:" + command);
             } else {
-                player.pause();
+                pausePlayback("remote:" + command);
             }
         } else if ("live".equals(command) || "seek_live".equals(command) || "seek_to_live".equals(command)) {
             seekToLiveEdgeIfNeeded();
-            player.play();
+            startPlayback("remote:" + command);
         } else if ("seek_forward".equals(command)) {
             seekBy(10000);
         } else if ("seek_back".equals(command)) {
@@ -1360,6 +1443,38 @@ public class VideoActivity extends Activity {
             return "ended";
         }
         return "idle";
+    }
+
+    private String playbackStateName(int state) {
+        switch (state) {
+            case ExoPlayer.STATE_IDLE:
+                return "IDLE";
+            case ExoPlayer.STATE_BUFFERING:
+                return "BUFFERING";
+            case ExoPlayer.STATE_READY:
+                return "READY";
+            case ExoPlayer.STATE_ENDED:
+                return "ENDED";
+            default:
+                return "UNKNOWN_" + state;
+        }
+    }
+
+    private String playWhenReadyReasonName(int reason) {
+        switch (reason) {
+            case Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST:
+                return "USER_REQUEST";
+            case Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS:
+                return "AUDIO_FOCUS_LOSS";
+            case Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY:
+                return "AUDIO_BECOMING_NOISY";
+            case Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE:
+                return "REMOTE";
+            case 5:
+                return "END_OF_MEDIA_ITEM";
+            default:
+                return "UNKNOWN_" + reason;
+        }
     }
 
     /* Send generic motion events to the gesture detector */
