@@ -15,6 +15,27 @@
         app:use_controller="false"
         app:surface_type="surface_view" />
 
+    <TextView
+        android:id="@+id/glass_caption_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginLeft="24dp"
+        android:layout_marginRight="24dp"
+        android:layout_marginBottom="44dp"
+        android:background="#B0000000"
+        android:gravity="center"
+        android:includeFontPadding="false"
+        android:maxLines="3"
+        android:paddingLeft="8dp"
+        android:paddingTop="5dp"
+        android:paddingRight="8dp"
+        android:paddingBottom="5dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
     <include layout="@layout/exo_controls" />
 
 </FrameLayout>

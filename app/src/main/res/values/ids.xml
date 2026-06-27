@@ -27,6 +27,7 @@
   <item type="id" name="exo_play"/>
   <item type="id" name="exo_pause"/>
   <item type="id" name="glass_time_label"/>
+  <item type="id" name="glass_caption_overlay"/>
   <item type="id" name="exo_position"/>
   <item type="id" name="glass_progress"/>
   <item type="id" name="exo_duration"/>
