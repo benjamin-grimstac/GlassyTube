@@ -481,13 +481,19 @@ public class MainActivity extends Activity {
             addCard(title, "Nothing here yet.", ActionType.NONE, null, null);
         } else {
             for (VideoStore.Entry entry : entries) {
-                addCard(entry.title, entry.url, ActionType.PLAY_URL, entry.title, entry.url);
+                String url = queue ? entry.url : appendResumeTimestamp(entry.url, entry.positionMs);
+                String detail = entry.url;
+                if (!queue && entry.positionMs > 0) {
+                    detail = "Resume " + formatDuration(entry.positionMs / 1000) + " - " + entry.url;
+                }
+                addCard(entry.title, detail, ActionType.PLAY_URL, entry.title, url);
             }
             if (queue) {
                 VideoStore.clearQueue(this);
             }
         }
         notifyCards();
+        selectFirstCard();
     }
 
     private void openIncomingUrl(String url) {
@@ -805,6 +811,30 @@ public class MainActivity extends Activity {
         long minutes = seconds / 60;
         long remainingSeconds = seconds % 60;
         return String.format(Locale.ROOT, "%02d:%02d", minutes, remainingSeconds);
+    }
+
+    private String appendResumeTimestamp(String url, long positionMs) {
+        if (url == null || url.length() == 0 || positionMs < 5000) {
+            return url;
+        }
+        try {
+            long seconds = Math.max(1, positionMs / 1000);
+            Uri uri = Uri.parse(url);
+            Uri.Builder builder = uri.buildUpon().clearQuery();
+            for (String name : uri.getQueryParameterNames()) {
+                if ("t".equals(name) || "start".equals(name) || "time_continue".equals(name)) {
+                    continue;
+                }
+                for (String value : uri.getQueryParameters(name)) {
+                    builder.appendQueryParameter(name, value);
+                }
+            }
+            builder.appendQueryParameter("t", seconds + "s");
+            return builder.build().toString();
+        } catch (Exception e) {
+            String separator = url.contains("?") ? "&" : "?";
+            return url + separator + "t=" + Math.max(1, positionMs / 1000) + "s";
+        }
     }
 
     public static String round(long val) {

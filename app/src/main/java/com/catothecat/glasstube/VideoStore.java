@@ -2,6 +2,7 @@ package com.catothecat.glasstube;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.net.Uri;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -38,11 +39,19 @@ public final class VideoStore {
         public final String title;
         public final String url;
         public final long time;
+        public final long positionMs;
+        public final long durationMs;
 
         public Entry(String title, String url, long time) {
+            this(title, url, time, 0, 0);
+        }
+
+        public Entry(String title, String url, long time, long positionMs, long durationMs) {
             this.title = cleanTitle(title, url);
-            this.url = url;
+            this.url = cleanPlaybackUrl(url);
             this.time = time;
+            this.positionMs = Math.max(0, positionMs);
+            this.durationMs = Math.max(0, durationMs);
         }
     }
 
@@ -113,6 +122,39 @@ public final class VideoStore {
                 .putLong(KEY_PLAYER_POSITION, Math.max(0, positionMs))
                 .putLong(KEY_PLAYER_DURATION, Math.max(0, durationMs))
                 .apply();
+        updateHistoryProgress(context, title, url, state, positionMs, durationMs);
+    }
+
+    private static void updateHistoryProgress(Context context, String title, String url, String state,
+                                              long positionMs, long durationMs) {
+        String cleanUrl = cleanPlaybackUrl(url);
+        if (cleanUrl.length() == 0 || durationMs <= 0) {
+            return;
+        }
+        long savedPosition = Math.max(0, positionMs);
+        if ("ended".equals(state) || savedPosition >= Math.max(0, durationMs - 10000)) {
+            savedPosition = 0;
+        } else if (savedPosition < 5000) {
+            return;
+        }
+        List<Entry> entries = read(context, KEY_HISTORY);
+        boolean found = false;
+        for (int i = 0; i < entries.size(); i++) {
+            Entry entry = entries.get(i);
+            if (cleanUrl.equals(entry.url)) {
+                entries.set(i, new Entry(cleanTitle(title, cleanUrl), cleanUrl,
+                        System.currentTimeMillis(), savedPosition, durationMs));
+                found = true;
+                break;
+            }
+        }
+        if (!found && savedPosition > 0) {
+            entries.add(0, new Entry(title, cleanUrl, System.currentTimeMillis(), savedPosition, durationMs));
+        }
+        while (entries.size() > MAX_ITEMS) {
+            entries.remove(entries.size() - 1);
+        }
+        write(context, KEY_HISTORY, entries);
     }
 
     public static void setAppActive(Context context, boolean active) {
@@ -152,15 +194,21 @@ public final class VideoStore {
             return;
         }
         List<Entry> entries = read(context, key);
+        Entry savedEntry = entry;
         for (int i = entries.size() - 1; i >= 0; i--) {
-            if (entry.url.equals(entries.get(i).url)) {
+            Entry existing = entries.get(i);
+            if (entry.url.equals(existing.url)) {
+                if (savedEntry.positionMs <= 0 && existing.positionMs > 0) {
+                    savedEntry = new Entry(savedEntry.title, savedEntry.url,
+                            System.currentTimeMillis(), existing.positionMs, existing.durationMs);
+                }
                 entries.remove(i);
             }
         }
         if (newestFirst) {
-            entries.add(0, entry);
+            entries.add(0, savedEntry);
         } else {
-            entries.add(entry);
+            entries.add(savedEntry);
         }
         while (entries.size() > MAX_ITEMS) {
             entries.remove(entries.size() - 1);
@@ -183,7 +231,8 @@ public final class VideoStore {
                 if (url.length() == 0) {
                     continue;
                 }
-                entries.add(new Entry(object.optString("title", url), url, object.optLong("time", 0)));
+                entries.add(new Entry(object.optString("title", url), url, object.optLong("time", 0),
+                        object.optLong("positionMs", 0), object.optLong("durationMs", 0)));
             }
         } catch (JSONException ignored) {
         }
@@ -198,6 +247,8 @@ public final class VideoStore {
                 object.put("title", entry.title);
                 object.put("url", entry.url);
                 object.put("time", entry.time);
+                object.put("positionMs", entry.positionMs);
+                object.put("durationMs", entry.durationMs);
                 array.put(object);
             } catch (JSONException ignored) {
             }
@@ -213,5 +264,26 @@ public final class VideoStore {
             return title.trim();
         }
         return url == null ? "YouTube video" : url;
+    }
+
+    private static String cleanPlaybackUrl(String url) {
+        if (url == null || url.trim().length() == 0) {
+            return "";
+        }
+        try {
+            Uri uri = Uri.parse(url.trim());
+            Uri.Builder builder = uri.buildUpon().clearQuery().fragment(null);
+            for (String name : uri.getQueryParameterNames()) {
+                if ("t".equals(name) || "start".equals(name) || "time_continue".equals(name)) {
+                    continue;
+                }
+                for (String value : uri.getQueryParameters(name)) {
+                    builder.appendQueryParameter(name, value);
+                }
+            }
+            return builder.build().toString();
+        } catch (Exception e) {
+            return url.trim();
+        }
     }
 }
